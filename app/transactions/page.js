@@ -221,10 +221,9 @@ function TransactionsInner() {
 
   // Get checked transaction objects
   const checkedTransactions = transactions.filter(t => checkedIds.has(t.id));
-  const checkedTotal = checkedTransactions.reduce((sum, t) => sum + Math.abs(t.amount), 0);
-  const checkedByCategory = checkedTransactions.reduce((acc, t) => {
+const checkedByCategory = checkedTransactions.reduce((acc, t) => {
     const cat = t.category ?? 'Uncategorised';
-    acc[cat] = (acc[cat] ?? 0) + Math.abs(t.amount);
+    acc[cat] = (acc[cat] ?? 0) - t.amount;
     return acc;
   }, {});
 
@@ -416,9 +415,9 @@ function TransactionsInner() {
   const visibleIds = filtered.map(t => t.id);
   const allVisibleChecked = visibleIds.length > 0 && visibleIds.every(id => checkedIds.has(id));
 
-  const sumTotal = filtered
+  const sumTotal = -filtered
     .filter(t => !t.is_original_split)
-    .reduce((sum, t) => sum + Math.abs(t.amount), 0);
+    .reduce((sum, t) => sum + t.amount, 0);
 
   return (
     <main className="min-h-screen bg-gray-50 p-6">

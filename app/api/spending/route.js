@@ -25,19 +25,20 @@ export async function GET(request) {
 
     // Query transactions in the date range, group by category, sum the amounts
     // ABS() flips negative amounts to positive for display purposes
-    const rows = db.prepare(`
+const rows = db.prepare(`
       SELECT
         category,
-        ROUND(SUM(ABS(amount)), 2) AS total_spent
+        ROUND(-SUM(amount), 2) AS total_spent
       FROM transactions
       WHERE
         transaction_date >= ?
         AND transaction_date <= ?
-        AND amount < 0
         AND category IS NOT NULL
         AND category != ''
         AND category != 'Transfer'
         AND category != 'Withdrawal'
+        AND category != 'Income'
+        AND is_original_split != 1
       GROUP BY category
       ORDER BY total_spent DESC
     `).all(start, end);

@@ -48,16 +48,17 @@ export async function GET(request) {
     const byCategory = db.prepare(`
       SELECT
         category,
-        ROUND(SUM(ABS(amount)), 2) AS total_spent
+        ROUND(-SUM(amount), 2) AS total_spent
       FROM transactions
       WHERE
         transaction_date >= ?
         AND transaction_date <= ?
-        AND amount < 0
         AND category IS NOT NULL
         AND category != ''
         AND category != 'Transfer'
         AND category != 'Withdrawal'
+        AND category != 'Income'
+        AND is_original_split != 1
       GROUP BY category
       ORDER BY total_spent DESC
     `).all(start, end);
@@ -111,12 +112,15 @@ export async function GET(request) {
     const trend = db.prepare(`
       SELECT
         strftime('%Y-%m', transaction_date) AS month,
-        ROUND(SUM(ABS(amount)), 2) AS total_spent
+        ROUND(-SUM(amount), 2) AS total_spent
       FROM transactions
       WHERE
-        amount < 0
+        category IS NOT NULL
+        AND category != ''
         AND category != 'Transfer'
         AND category != 'Withdrawal'
+        AND category != 'Income'
+        AND is_original_split != 1
         AND transaction_date >= DATE('now', '-12 months')
       GROUP BY month
       ORDER BY month ASC
@@ -140,14 +144,15 @@ export async function GET(request) {
       SELECT
         strftime('%Y-%m', transaction_date) AS month,
         category,
-        ROUND(SUM(ABS(amount)), 2) AS total_spent
+        ROUND(-SUM(amount), 2) AS total_spent
       FROM transactions
       WHERE
-        amount < 0
-        AND category IS NOT NULL
+        category IS NOT NULL
         AND category != ''
         AND category != 'Transfer'
         AND category != 'Withdrawal'
+        AND category != 'Income'
+        AND is_original_split != 1
         AND transaction_date >= DATE('now', '-12 months')
       GROUP BY month, category
       ORDER BY month ASC

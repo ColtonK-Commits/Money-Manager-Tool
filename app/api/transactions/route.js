@@ -172,7 +172,7 @@ export async function POST(request) {
       description,
       category ?? null,
       type ?? null,
-      -Math.abs(amount),
+      amount,
       memo ?? null,
       account ?? 'manual'
     );

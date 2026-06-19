@@ -23,11 +23,12 @@ export async function GET(request) {
 SELECT
             COALESCE(custom_description, description) AS merchant,
             COUNT(*) AS transaction_count,
-            ROUND(SUM(ABS(amount)), 2) AS total_spent
+            ROUND(-SUM(amount), 2) AS total_spent
           FROM transactions
-          WHERE amount < 0
-            AND category != 'Transfer'
+          WHERE category != 'Transfer'
             AND category != 'Withdrawal'
+            AND category != 'Income'
+            AND is_original_split != 1
             AND transaction_date >= COALESCE(?, DATE('now', '-12 months'))
             AND transaction_date <= COALESCE(?, DATE('now'))
           GROUP BY COALESCE(custom_description, description)
@@ -62,17 +63,18 @@ SELECT
         const rows = db.prepare(`
           SELECT
             category,
-            ROUND(SUM(ABS(amount)), 2) AS total_spent,
+            ROUND(-SUM(amount), 2) AS total_spent,
             COUNT(DISTINCT strftime('%Y-%m', transaction_date)) AS months_active,
-            ROUND(SUM(ABS(amount)) / COUNT(DISTINCT strftime('%Y-%m', transaction_date)), 2) AS monthly_avg,
-            ROUND(SUM(ABS(amount)) / COUNT(DISTINCT strftime('%Y-%W', transaction_date)), 2) AS weekly_avg,
-            ROUND(SUM(ABS(amount)) / COUNT(DISTINCT transaction_date), 2) AS daily_avg
+            ROUND(-SUM(amount) / COUNT(DISTINCT strftime('%Y-%m', transaction_date)), 2) AS monthly_avg,
+            ROUND(-SUM(amount) / COUNT(DISTINCT strftime('%Y-%W', transaction_date)), 2) AS weekly_avg,
+            ROUND(-SUM(amount) / COUNT(DISTINCT transaction_date), 2) AS daily_avg
           FROM transactions
-          WHERE amount < 0
-            AND category IS NOT NULL
+          WHERE category IS NOT NULL
             AND category != ''
             AND category != 'Transfer'
             AND category != 'Withdrawal'
+            AND category != 'Income'
+            AND is_original_split != 1
             AND transaction_date >= COALESCE(?, DATE('now', '-12 months'))
             AND transaction_date <= COALESCE(?, DATE('now'))
           GROUP BY category
@@ -88,14 +90,15 @@ SELECT
         const rows = db.prepare(`
           SELECT
             category,
-            ROUND(SUM(CASE WHEN strftime('%Y', transaction_date) = ? THEN ABS(amount) ELSE 0 END), 2) AS current_year,
-            ROUND(SUM(CASE WHEN strftime('%Y', transaction_date) = ? THEN ABS(amount) ELSE 0 END), 2) AS prev_year
+            ROUND(-SUM(CASE WHEN strftime('%Y', transaction_date) = ? THEN amount ELSE 0 END), 2) AS current_year,
+            ROUND(-SUM(CASE WHEN strftime('%Y', transaction_date) = ? THEN amount ELSE 0 END), 2) AS prev_year
           FROM transactions
-          WHERE amount < 0
-            AND category IS NOT NULL
+          WHERE category IS NOT NULL
             AND category != ''
             AND category != 'Transfer'
             AND category != 'Withdrawal'
+            AND category != 'Income'
+            AND is_original_split != 1
             AND strftime('%Y', transaction_date) IN (?, ?)
           GROUP BY category
           ORDER BY current_year DESC
@@ -109,13 +112,14 @@ SELECT
           SELECT
             strftime('%Y-%m', transaction_date) AS month,
             category,
-            ROUND(SUM(ABS(amount)), 2) AS total_spent
+            ROUND(-SUM(amount), 2) AS total_spent
           FROM transactions
-          WHERE amount < 0
-            AND category IS NOT NULL
+          WHERE category IS NOT NULL
             AND category != ''
             AND category != 'Transfer'
             AND category != 'Withdrawal'
+            AND category != 'Income'
+            AND is_original_split != 1
             AND transaction_date >= DATE('now', '-12 months')
           GROUP BY month, category
           ORDER BY month ASC, total_spent DESC
@@ -128,12 +132,13 @@ SELECT
         const rows = db.prepare(`
           SELECT
             strftime('%Y-%m', transaction_date) AS month,
-            ROUND(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 2) AS income,
-            ROUND(SUM(CASE WHEN amount < 0 THEN ABS(amount) ELSE 0 END), 2) AS spending
+            ROUND(SUM(CASE WHEN amount > 0 AND category = 'Income' THEN amount ELSE 0 END), 2) AS income,
+            ROUND(-SUM(CASE WHEN category != 'Income' THEN amount ELSE 0 END), 2) AS spending
           FROM transactions
           WHERE transaction_date >= DATE('now', '-12 months')
             AND category != 'Transfer'
             AND category != 'Withdrawal'
+            AND is_original_split != 1
           GROUP BY month
           ORDER BY month ASC
         `).all();
@@ -154,11 +159,12 @@ SELECT
         const rows = db.prepare(`
           SELECT
             strftime('%Y-%m', transaction_date) AS month,
-            ROUND(SUM(ABS(amount)), 2) AS total_spent
+            ROUND(-SUM(amount), 2) AS total_spent
           FROM transactions
-          WHERE amount < 0
-            AND category != 'Transfer'
+          WHERE category != 'Transfer'
             AND category != 'Withdrawal'
+            AND category != 'Income'
+            AND is_original_split != 1
             AND transaction_date >= DATE('now', '-12 months')
           GROUP BY month
           ORDER BY month ASC
@@ -184,17 +190,18 @@ SELECT
           SELECT
             t.category,
             strftime('%Y-%m', t.transaction_date) AS month,
-            ROUND(SUM(ABS(t.amount)), 2) AS actual,
+            ROUND(-SUM(t.amount), 2) AS actual,
             COALESCE(mb.monthly_target, 0) AS budget
           FROM transactions t
           LEFT JOIN monthly_budgets mb
             ON mb.category = t.category
             AND mb.month = strftime('%Y-%m', t.transaction_date)
-          WHERE t.amount < 0
-            AND t.category IS NOT NULL
+          WHERE t.category IS NOT NULL
             AND t.category != ''
             AND t.category != 'Transfer'
             AND t.category != 'Withdrawal'
+            AND t.category != 'Income'
+            AND t.is_original_split != 1
             AND t.transaction_date >= DATE('now', '-6 months')
           GROUP BY t.category, month
           ORDER BY t.category, month

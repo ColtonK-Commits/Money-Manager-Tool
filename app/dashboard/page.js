@@ -319,7 +319,7 @@ const [monthIncome, setMonthIncome] = useState(0);
               <div className="bg-white rounded-xl shadow p-5 flex-1">
                 <h2 className="text-sm font-semibold text-gray-600 mb-1">Budget vs actual</h2>
                 <p className="text-xs text-gray-400 mb-4">Dashed outline = projected end-of-month spend</p>
-                <div className="space-y-4">
+                <div className="space-y-6">
                   {data.categoryData.map(cat => {
                     const target = cat.monthly_target;
                     const spent = cat.total_spent;
