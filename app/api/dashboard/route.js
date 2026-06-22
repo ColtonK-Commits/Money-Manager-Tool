@@ -1,10 +1,16 @@
-// app/api/dashboard/route.js
-
 import Database from 'better-sqlite3';
 import path from 'path';
 import { NextResponse } from 'next/server';
+import { getServerSession } from 'next-auth';
+import { authOptions } from '../auth/[...nextauth]/route';
 
 const db = new Database(path.join(process.cwd(), 'money_manager.db'));
+
+async function getUserId() {
+  const session = await getServerSession(authOptions);
+  if (!session?.user?.id) return null;
+  return session.user.id;
+}
 
 // Categories that should have end-of-month projections
 const PROJECTION_CATEGORIES = new Set([
@@ -21,6 +27,9 @@ const PROJECTION_CATEGORIES = new Set([
 
 export async function GET(request) {
   try {
+    const userId = await getUserId();
+    if (!userId) return NextResponse.json({ error: 'Unauthorised' }, { status: 401 });
+
     const { searchParams } = new URL(request.url);
     const month = searchParams.get('month');
 
@@ -29,8 +38,9 @@ export async function GET(request) {
       const months = db.prepare(`
         SELECT DISTINCT strftime('%Y-%m', transaction_date) AS month
         FROM transactions
+        WHERE user_id = ?
         ORDER BY month DESC
-      `).all().map(r => r.month);
+      `).all(userId).map(r => r.month);
       return NextResponse.json(months);
     }
 
@@ -53,6 +63,7 @@ export async function GET(request) {
       WHERE
         transaction_date >= ?
         AND transaction_date <= ?
+        AND user_id = ?
         AND category IS NOT NULL
         AND category != ''
         AND category != 'Transfer'
@@ -61,14 +72,14 @@ export async function GET(request) {
         AND is_original_split != 1
       GROUP BY category
       ORDER BY total_spent DESC
-    `).all(start, end);
+    `).all(start, end, userId);
 
     // Budgets for the selected month from monthly_budgets
     const budgets = db.prepare(`
       SELECT category, monthly_target
       FROM monthly_budgets
-      WHERE month = ?
-    `).all(month);
+      WHERE month = ? AND user_id = ?
+    `).all(month, userId);
 
     const budgetMap = {};
     for (const b of budgets) {
@@ -78,7 +89,8 @@ export async function GET(request) {
     // Category colours
     const colours = db.prepare(`
       SELECT name, colour FROM categories
-    `).all();
+      WHERE user_id = ?
+    `).all(userId);
 
     const colourMap = {};
     for (const c of colours) {
@@ -86,7 +98,6 @@ export async function GET(request) {
     }
 
     // Calculate projection for eligible categories
-    // Only project for the current month — past months are complete
     const today = new Date();
     const isCurrentMonth = month === `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`;
     const dayOfMonth = today.getDate();
@@ -115,7 +126,8 @@ export async function GET(request) {
         ROUND(-SUM(amount), 2) AS total_spent
       FROM transactions
       WHERE
-        category IS NOT NULL
+        user_id = ?
+        AND category IS NOT NULL
         AND category != ''
         AND category != 'Transfer'
         AND category != 'Withdrawal'
@@ -124,14 +136,14 @@ export async function GET(request) {
         AND transaction_date >= DATE('now', '-12 months')
       GROUP BY month
       ORDER BY month ASC
-    `).all();
+    `).all(userId);
 
     const trendWithBudget = trend.map(row => {
       const monthBudgets = db.prepare(`
         SELECT SUM(monthly_target) AS total_budget
         FROM monthly_budgets
-        WHERE month = ?
-      `).get(row.month);
+        WHERE month = ? AND user_id = ?
+      `).get(row.month, userId);
 
       return {
         ...row,
@@ -139,7 +151,7 @@ export async function GET(request) {
       };
     });
 
-// Category trends — spending per category per month for last 12 months
+    // Category trends — spending per category per month for last 12 months
     const categoryTrends = db.prepare(`
       SELECT
         strftime('%Y-%m', transaction_date) AS month,
@@ -147,7 +159,8 @@ export async function GET(request) {
         ROUND(-SUM(amount), 2) AS total_spent
       FROM transactions
       WHERE
-        category IS NOT NULL
+        user_id = ?
+        AND category IS NOT NULL
         AND category != ''
         AND category != 'Transfer'
         AND category != 'Withdrawal'
@@ -156,15 +169,11 @@ export async function GET(request) {
         AND transaction_date >= DATE('now', '-12 months')
       GROUP BY month, category
       ORDER BY month ASC
-    `).all();
+    `).all(userId);
 
-    // Get all unique categories that appear in the trends
     const trendCategories = [...new Set(categoryTrends.map(r => r.category))].sort();
-
-    // Get all unique months in the trends
     const trendMonths = [...new Set(categoryTrends.map(r => r.month))].sort();
 
-    // Build a lookup: { 'Groceries': { '2026-04': 312.50, '2026-05': 287.00 } }
     const trendLookup = {};
     for (const row of categoryTrends) {
       if (!trendLookup[row.category]) trendLookup[row.category] = {};
@@ -176,7 +185,7 @@ export async function GET(request) {
       monthlyTrend: trendWithBudget,
       categoryTrends: { months: trendMonths, categories: trendCategories, lookup: trendLookup },
     });
-    } catch (error) {
+  } catch (error) {
     console.error('GET /api/dashboard error:', error);
     return NextResponse.json({ error: 'Failed to fetch dashboard data' }, { status: 500 });
   }
