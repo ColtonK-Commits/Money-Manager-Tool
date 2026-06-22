@@ -1,12 +1,9 @@
 // app/api/reports/route.js
 
-import Database from 'better-sqlite3';
-import path from 'path';
 import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '../auth/[...nextauth]/route';
-
-const db = new Database(path.join(process.cwd(), 'money_manager.db'));
+import sql from '../../../lib/db';
 
 async function getUserId() {
   const session = await getServerSession(authOptions);
@@ -30,168 +27,190 @@ export async function GET(request) {
 
       // --- Top merchants by spend ---
       case 'top_merchants': {
-        const rows = db.prepare(`
+        const rows = await sql`
           SELECT
             COALESCE(custom_description, description) AS merchant,
             COUNT(*) AS transaction_count,
-            ROUND(-SUM(amount), 2) AS total_spent
+            ROUND(-SUM(amount)::numeric, 2) AS total_spent
           FROM transactions
-          WHERE user_id = ?
+          WHERE user_id = ${userId}
             AND category != 'Transfer'
             AND category != 'Withdrawal'
             AND category != 'Income'
             AND is_original_split != 1
-            AND transaction_date >= COALESCE(?, DATE('now', '-12 months'))
-            AND transaction_date <= COALESCE(?, DATE('now'))
+            AND transaction_date >= COALESCE(${start}, (NOW() - INTERVAL '12 months')::date::text)
+            AND transaction_date <= COALESCE(${end}, NOW()::date::text)
           GROUP BY COALESCE(custom_description, description)
           ORDER BY total_spent DESC
           LIMIT 20
-        `).all(userId, start, end);
-        return NextResponse.json(rows);
+        `;
+        return NextResponse.json(rows.map(r => ({ ...r, total_spent: parseFloat(r.total_spent) })));
       }
 
       // --- Biggest single transactions ---
-case 'biggest_transactions': {
-        const rows = db.prepare(`
+      case 'biggest_transactions': {
+        const rows = await sql`
           SELECT
             COALESCE(custom_description, description) AS merchant,
             category,
             transaction_date,
             ABS(amount) AS amount
           FROM transactions
-          WHERE user_id = ?
+          WHERE user_id = ${userId}
             AND amount < 0
             AND is_original_split != 1
             AND category != 'Transfer'
             AND category != 'Withdrawal'
-            AND transaction_date >= COALESCE(?, DATE('now', '-12 months'))
-            AND transaction_date <= COALESCE(?, DATE('now'))
+            AND transaction_date >= COALESCE(${start}, (NOW() - INTERVAL '12 months')::date::text)
+            AND transaction_date <= COALESCE(${end}, NOW()::date::text)
           ORDER BY amount DESC
           LIMIT 20
-        `).all(userId, start, end);
-        return NextResponse.json(rows);
+        `;
+        return NextResponse.json(rows.map(r => ({ ...r, amount: parseFloat(r.amount) })));
       }
 
       // --- Average spend by category ---
       case 'category_averages': {
-        const rows = db.prepare(`
+        const rows = await sql`
           SELECT
             category,
-            ROUND(-SUM(amount), 2) AS total_spent,
-            COUNT(DISTINCT strftime('%Y-%m', transaction_date)) AS months_active,
-            ROUND(-SUM(amount) / COUNT(DISTINCT strftime('%Y-%m', transaction_date)), 2) AS monthly_avg,
-            ROUND(-SUM(amount) / COUNT(DISTINCT strftime('%Y-%W', transaction_date)), 2) AS weekly_avg,
-            ROUND(-SUM(amount) / COUNT(DISTINCT transaction_date), 2) AS daily_avg
+            ROUND(-SUM(amount)::numeric, 2) AS total_spent,
+            COUNT(DISTINCT TO_CHAR(transaction_date::date, 'YYYY-MM')) AS months_active,
+            ROUND((-SUM(amount) / COUNT(DISTINCT TO_CHAR(transaction_date::date, 'YYYY-MM')))::numeric, 2) AS monthly_avg,
+            ROUND((-SUM(amount) / COUNT(DISTINCT TO_CHAR(transaction_date::date, 'IYYY-IW')))::numeric, 2) AS weekly_avg,
+            ROUND((-SUM(amount) / COUNT(DISTINCT transaction_date))::numeric, 2) AS daily_avg
           FROM transactions
-          WHERE user_id = ?
+          WHERE user_id = ${userId}
             AND category IS NOT NULL
             AND category != ''
             AND category != 'Transfer'
             AND category != 'Withdrawal'
             AND category != 'Income'
             AND is_original_split != 1
-            AND transaction_date >= COALESCE(?, DATE('now', '-12 months'))
-            AND transaction_date <= COALESCE(?, DATE('now'))
+            AND transaction_date >= COALESCE(${start}, (NOW() - INTERVAL '12 months')::date::text)
+            AND transaction_date <= COALESCE(${end}, NOW()::date::text)
           GROUP BY category
           ORDER BY total_spent DESC
-        `).all(userId, start, end);
-        return NextResponse.json(rows);
+        `;
+        return NextResponse.json(rows.map(r => ({
+          ...r,
+          total_spent: parseFloat(r.total_spent),
+          monthly_avg: parseFloat(r.monthly_avg),
+          weekly_avg: parseFloat(r.weekly_avg),
+          daily_avg: parseFloat(r.daily_avg),
+        })));
       }
 
       // --- Year over year comparison ---
       case 'year_over_year': {
-        const currentYear = year ?? new Date().getFullYear();
-        const prevYear = currentYear - 1;
-        const rows = db.prepare(`
+        const currentYear = String(year ?? new Date().getFullYear());
+        const prevYear = String(parseInt(currentYear) - 1);
+        const rows = await sql`
           SELECT
             category,
-            ROUND(-SUM(CASE WHEN strftime('%Y', transaction_date) = ? THEN amount ELSE 0 END), 2) AS current_year,
-            ROUND(-SUM(CASE WHEN strftime('%Y', transaction_date) = ? THEN amount ELSE 0 END), 2) AS prev_year
+            ROUND(-SUM(CASE WHEN TO_CHAR(transaction_date::date, 'YYYY') = ${currentYear} THEN amount ELSE 0 END)::numeric, 2) AS current_year,
+            ROUND(-SUM(CASE WHEN TO_CHAR(transaction_date::date, 'YYYY') = ${prevYear} THEN amount ELSE 0 END)::numeric, 2) AS prev_year
           FROM transactions
-          WHERE user_id = ?
+          WHERE user_id = ${userId}
             AND category IS NOT NULL
             AND category != ''
             AND category != 'Transfer'
             AND category != 'Withdrawal'
             AND category != 'Income'
             AND is_original_split != 1
-            AND strftime('%Y', transaction_date) IN (?, ?)
+            AND TO_CHAR(transaction_date::date, 'YYYY') IN (${currentYear}, ${prevYear})
           GROUP BY category
           ORDER BY current_year DESC
-        `).all(String(currentYear), String(prevYear), userId, String(currentYear), String(prevYear));
-        return NextResponse.json({ rows, currentYear, prevYear });
+        `;
+        return NextResponse.json({
+          rows: rows.map(r => ({
+            ...r,
+            current_year: parseFloat(r.current_year),
+            prev_year: parseFloat(r.prev_year),
+          })),
+          currentYear,
+          prevYear,
+        });
       }
 
       // --- Monthly spend trend by category ---
       case 'category_trends': {
-        const rows = db.prepare(`
+        const rows = await sql`
           SELECT
-            strftime('%Y-%m', transaction_date) AS month,
+            TO_CHAR(transaction_date::date, 'YYYY-MM') AS month,
             category,
-            ROUND(-SUM(amount), 2) AS total_spent
+            ROUND(-SUM(amount)::numeric, 2) AS total_spent
           FROM transactions
-          WHERE user_id = ?
+          WHERE user_id = ${userId}
             AND category IS NOT NULL
             AND category != ''
             AND category != 'Transfer'
             AND category != 'Withdrawal'
             AND category != 'Income'
             AND is_original_split != 1
-            AND transaction_date >= DATE('now', '-12 months')
-          GROUP BY month, category
+            AND transaction_date >= (NOW() - INTERVAL '12 months')::date::text
+          GROUP BY TO_CHAR(transaction_date::date, 'YYYY-MM'), category
           ORDER BY month ASC, total_spent DESC
-        `).all(userId);
-        return NextResponse.json(rows);
+        `;
+        return NextResponse.json(rows.map(r => ({ ...r, total_spent: parseFloat(r.total_spent) })));
       }
 
       // --- Savings rate ---
       case 'savings_rate': {
-        const rows = db.prepare(`
+        const rows = await sql`
           SELECT
-            strftime('%Y-%m', transaction_date) AS month,
-            ROUND(SUM(CASE WHEN amount > 0 AND category = 'Income' THEN amount ELSE 0 END), 2) AS income,
-            ROUND(-SUM(CASE WHEN category != 'Income' THEN amount ELSE 0 END), 2) AS spending
+            TO_CHAR(transaction_date::date, 'YYYY-MM') AS month,
+            ROUND(SUM(CASE WHEN amount > 0 AND category = 'Income' THEN amount ELSE 0 END)::numeric, 2) AS income,
+            ROUND(-SUM(CASE WHEN category != 'Income' THEN amount ELSE 0 END)::numeric, 2) AS spending
           FROM transactions
-          WHERE user_id = ?
-            AND transaction_date >= DATE('now', '-12 months')
+          WHERE user_id = ${userId}
+            AND transaction_date >= (NOW() - INTERVAL '12 months')::date::text
             AND category != 'Transfer'
             AND category != 'Withdrawal'
             AND is_original_split != 1
-          GROUP BY month
+          GROUP BY TO_CHAR(transaction_date::date, 'YYYY-MM')
           ORDER BY month ASC
-        `).all(userId);
+        `;
 
-        const withRate = rows.map(r => ({
-          ...r,
-          net: Math.round((r.income - r.spending) * 100) / 100,
-          savings_rate: r.income > 0
-            ? Math.round(((r.income - r.spending) / r.income) * 100 * 10) / 10
-            : null,
-        }));
+        const withRate = rows.map(r => {
+          const income = parseFloat(r.income);
+          const spending = parseFloat(r.spending);
+          return {
+            ...r,
+            income,
+            spending,
+            net: Math.round((income - spending) * 100) / 100,
+            savings_rate: income > 0
+              ? Math.round(((income - spending) / income) * 100 * 10) / 10
+              : null,
+          };
+        });
 
         return NextResponse.json(withRate);
       }
 
       // --- Rolling averages ---
       case 'rolling_averages': {
-        const rows = db.prepare(`
+        const rows = await sql`
           SELECT
-            strftime('%Y-%m', transaction_date) AS month,
-            ROUND(-SUM(amount), 2) AS total_spent
+            TO_CHAR(transaction_date::date, 'YYYY-MM') AS month,
+            ROUND(-SUM(amount)::numeric, 2) AS total_spent
           FROM transactions
-          WHERE user_id = ?
+          WHERE user_id = ${userId}
             AND category != 'Transfer'
             AND category != 'Withdrawal'
             AND category != 'Income'
             AND is_original_split != 1
-            AND transaction_date >= DATE('now', '-12 months')
-          GROUP BY month
+            AND transaction_date >= (NOW() - INTERVAL '12 months')::date::text
+          GROUP BY TO_CHAR(transaction_date::date, 'YYYY-MM')
           ORDER BY month ASC
-        `).all(userId);
+        `;
 
-        const withRolling = rows.map((row, i) => {
-          const last3 = rows.slice(Math.max(0, i - 2), i + 1);
-          const last12 = rows.slice(Math.max(0, i - 11), i + 1);
+        const parsed = rows.map(r => ({ ...r, total_spent: parseFloat(r.total_spent) }));
+
+        const withRolling = parsed.map((row, i) => {
+          const last3 = parsed.slice(Math.max(0, i - 2), i + 1);
+          const last12 = parsed.slice(Math.max(0, i - 11), i + 1);
           return {
             ...row,
             rolling_3: Math.round((last3.reduce((s, r) => s + r.total_spent, 0) / last3.length) * 100) / 100,
@@ -204,39 +223,41 @@ case 'biggest_transactions': {
 
       // --- Budget variance ---
       case 'budget_variance': {
-        const rows = db.prepare(`
+        const rows = await sql`
           SELECT
             t.category,
-            strftime('%Y-%m', t.transaction_date) AS month,
-            ROUND(-SUM(t.amount), 2) AS actual,
+            TO_CHAR(t.transaction_date::date, 'YYYY-MM') AS month,
+            ROUND(-SUM(t.amount)::numeric, 2) AS actual,
             COALESCE(mb.monthly_target, 0) AS budget
           FROM transactions t
           LEFT JOIN monthly_budgets mb
             ON mb.category = t.category
-            AND mb.month = strftime('%Y-%m', t.transaction_date)
-            AND mb.user_id = ?
-          WHERE t.user_id = ?
+            AND mb.month = TO_CHAR(t.transaction_date::date, 'YYYY-MM')
+            AND mb.user_id = ${userId}
+          WHERE t.user_id = ${userId}
             AND t.category IS NOT NULL
             AND t.category != ''
             AND t.category != 'Transfer'
             AND t.category != 'Withdrawal'
             AND t.category != 'Income'
             AND t.is_original_split != 1
-            AND t.transaction_date >= DATE('now', '-6 months')
-          GROUP BY t.category, month
+            AND t.transaction_date >= (NOW() - INTERVAL '6 months')::date::text
+          GROUP BY t.category, TO_CHAR(t.transaction_date::date, 'YYYY-MM'), mb.monthly_target
           ORDER BY t.category, month
-        `).all(userId, userId);
+        `;
 
         const byCategory = {};
         for (const row of rows) {
           if (!byCategory[row.category]) {
             byCategory[row.category] = { category: row.category, months: [], avg_variance: 0 };
           }
+          const actual = parseFloat(row.actual);
+          const budget = parseFloat(row.budget);
           byCategory[row.category].months.push({
             month: row.month,
-            actual: row.actual,
-            budget: row.budget,
-            variance: Math.round((row.actual - row.budget) * 100) / 100,
+            actual,
+            budget,
+            variance: Math.round((actual - budget) * 100) / 100,
           });
         }
 
@@ -250,9 +271,9 @@ case 'biggest_transactions': {
         return NextResponse.json(Object.values(byCategory).sort((a, b) => (b.avg_variance ?? 0) - (a.avg_variance ?? 0)));
       }
 
-      // --- Full transaction export (for Excel/PDF) ---
+      // --- Full transaction export ---
       case 'export': {
-        const rows = db.prepare(`
+        const rows = await sql`
           SELECT
             transaction_date,
             post_date,
@@ -263,34 +284,34 @@ case 'biggest_transactions': {
             memo,
             account
           FROM transactions
-          WHERE user_id = ?
-            AND transaction_date >= COALESCE(?, '2000-01-01')
-            AND transaction_date <= COALESCE(?, DATE('now'))
+          WHERE user_id = ${userId}
+            AND transaction_date >= COALESCE(${start}, '2000-01-01')
+            AND transaction_date <= COALESCE(${end}, NOW()::date::text)
           ORDER BY transaction_date DESC
-        `).all(userId, start, end);
+        `;
         return NextResponse.json(rows);
       }
 
       // --- Recurring transaction detection ---
       case 'recurring': {
-        const allTx = db.prepare(`
+        const allTx = await sql`
           SELECT
             COALESCE(custom_description, description) AS merchant,
             transaction_date,
             ABS(amount) AS amount,
             category
           FROM transactions
-          WHERE user_id = ?
+          WHERE user_id = ${userId}
             AND amount < 0
             AND is_original_split != 1
-            AND transaction_date >= DATE('now', '-13 months')
+            AND transaction_date >= (NOW() - INTERVAL '13 months')::date::text
           ORDER BY merchant, transaction_date ASC
-        `).all(userId);
+        `;
 
         const byMerchant = {};
         for (const tx of allTx) {
           if (!byMerchant[tx.merchant]) byMerchant[tx.merchant] = [];
-          byMerchant[tx.merchant].push(tx);
+          byMerchant[tx.merchant].push({ ...tx, amount: parseFloat(tx.amount) });
         }
 
         const recurring = [];
@@ -343,54 +364,54 @@ case 'biggest_transactions': {
 
       // --- Income by month ---
       case 'income_by_month': {
-        const rows = db.prepare(`
+        const rows = await sql`
           SELECT
-            strftime('%Y-%m', transaction_date) AS month,
-            ROUND(SUM(amount), 2) AS total_income,
+            TO_CHAR(transaction_date::date, 'YYYY-MM') AS month,
+            ROUND(SUM(amount)::numeric, 2) AS total_income,
             COUNT(*) AS transaction_count
           FROM transactions
-          WHERE user_id = ?
+          WHERE user_id = ${userId}
             AND amount > 0
             AND category = 'Income'
-            AND transaction_date >= DATE('now', '-12 months')
-          GROUP BY month
+            AND transaction_date >= (NOW() - INTERVAL '12 months')::date::text
+          GROUP BY TO_CHAR(transaction_date::date, 'YYYY-MM')
           ORDER BY month ASC
-        `).all(userId);
-        return NextResponse.json(rows);
+        `;
+        return NextResponse.json(rows.map(r => ({ ...r, total_income: parseFloat(r.total_income) })));
       }
 
-// --- Income by source ---
+      // --- Income by source ---
       case 'income_by_source': {
-        const rows = db.prepare(`
+        const rows = await sql`
           SELECT
             COALESCE(custom_description, description) AS source,
-            ROUND(SUM(amount), 2) AS amount,
+            ROUND(SUM(amount)::numeric, 2) AS amount,
             MAX(transaction_date) AS transaction_date,
             COUNT(*) AS transaction_count
           FROM transactions
-          WHERE user_id = ?
+          WHERE user_id = ${userId}
             AND amount > 0
             AND category = 'Income'
-            AND transaction_date >= COALESCE(?, DATE('now', '-12 months'))
-            AND transaction_date <= COALESCE(?, DATE('now'))
+            AND transaction_date >= COALESCE(${start}, (NOW() - INTERVAL '12 months')::date::text)
+            AND transaction_date <= COALESCE(${end}, NOW()::date::text)
           GROUP BY COALESCE(custom_description, description)
           ORDER BY amount DESC
-        `).all(userId, start, end);
-        return NextResponse.json(rows);
+        `;
+        return NextResponse.json(rows.map(r => ({ ...r, amount: parseFloat(r.amount) })));
       }
 
-      // --- Income for a specific month (for budget page) ---
+      // --- Income for a specific month ---
       case 'income_for_month': {
-        const row = db.prepare(`
+        const rows = await sql`
           SELECT
-            ROUND(SUM(amount), 2) AS total_income
+            ROUND(SUM(amount)::numeric, 2) AS total_income
           FROM transactions
-          WHERE user_id = ?
+          WHERE user_id = ${userId}
             AND amount > 0
             AND category = 'Income'
-            AND strftime('%Y-%m', transaction_date) = ?
-        `).get(userId, month);
-        return NextResponse.json({ total_income: row?.total_income ?? 0 });
+            AND TO_CHAR(transaction_date::date, 'YYYY-MM') = ${month}
+        `;
+        return NextResponse.json({ total_income: parseFloat(rows[0]?.total_income ?? 0) });
       }
 
       default:
