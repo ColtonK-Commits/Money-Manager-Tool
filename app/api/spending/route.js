@@ -3,19 +3,26 @@
 import Database from 'better-sqlite3';
 import path from 'path';
 import { NextResponse } from 'next/server';
+import { getServerSession } from 'next-auth';
+import { authOptions } from '../auth/[...nextauth]/route';
 
-// Opens a connection to your SQLite database file
 const db = new Database(path.join(process.cwd(), 'money_manager.db'));
 
-// GET — accepts a start and end date, returns total spending per category in that range
+async function getUserId() {
+  const session = await getServerSession(authOptions);
+  if (!session?.user?.id) return null;
+  return session.user.id;
+}
+
 export async function GET(request) {
   try {
-    // Read the date range from the URL, e.g. /api/spending?start=2024-01-01&end=2024-01-31
+    const userId = await getUserId();
+    if (!userId) return NextResponse.json({ error: 'Unauthorised' }, { status: 401 });
+
     const { searchParams } = new URL(request.url);
     const start = searchParams.get('start');
     const end = searchParams.get('end');
 
-    // Both dates are required
     if (!start || !end) {
       return NextResponse.json(
         { error: 'start and end query parameters are required' },
@@ -23,9 +30,7 @@ export async function GET(request) {
       );
     }
 
-    // Query transactions in the date range, group by category, sum the amounts
-    // ABS() flips negative amounts to positive for display purposes
-const rows = db.prepare(`
+    const rows = db.prepare(`
       SELECT
         category,
         ROUND(-SUM(amount), 2) AS total_spent
@@ -33,6 +38,7 @@ const rows = db.prepare(`
       WHERE
         transaction_date >= ?
         AND transaction_date <= ?
+        AND user_id = ?
         AND category IS NOT NULL
         AND category != ''
         AND category != 'Transfer'
@@ -41,7 +47,7 @@ const rows = db.prepare(`
         AND is_original_split != 1
       GROUP BY category
       ORDER BY total_spent DESC
-    `).all(start, end);
+    `).all(start, end, userId);
 
     return NextResponse.json(rows);
   } catch (error) {
