@@ -63,31 +63,7 @@ export default function AccountsPage() {
 
     handler.open();
   }
-  async function handleUpdateIds(accountId) {
-    setSyncing(accountId);
-    const res = await fetch('/api/plaid/update-ids', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ account_id: accountId }),
-    });
-    const data = await res.json();
-    setSyncResults(prev => ({ ...prev, [accountId]: `IDs updated: ${data.updated}` }));
-    setSyncing(null);
-  }
-async function handleHistorical(accountId) {
-    setSyncing(accountId);
-    setSyncResults(prev => ({ ...prev, [accountId]: null }));
 
-    const res = await fetch('/api/plaid/historical', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ account_id: accountId }),
-    });
-
-    const data = await res.json();
-    setSyncResults(prev => ({ ...prev, [accountId]: data.total ?? 0 }));
-    setSyncing(null);
-  }
   async function handleSync(accountId) {
     setSyncing(accountId);
     setSyncResults(prev => ({ ...prev, [accountId]: null }));
@@ -160,20 +136,7 @@ className="bg-blue-500 hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not
                     ✓ {syncResults[account.account_id]} new transaction{syncResults[account.account_id] !== 1 ? 's' : ''} imported
                   </span>
                 )}
-                <button
-                  onClick={() => handleHistorical(account.account_id)}
-                  disabled={syncing === account.account_id}
-                  className="bg-purple-100 hover:bg-purple-200 disabled:opacity-50 text-purple-700 px-4 py-1.5 rounded-lg text-xs font-medium"
-                >
-                  {syncing === account.account_id ? 'Pulling...' : '↓ 2yr history'}
-                </button>
-                <button
-                  onClick={() => handleUpdateIds(account.account_id)}
-                  disabled={syncing === account.account_id}
-                  className="bg-yellow-100 hover:bg-yellow-200 disabled:opacity-50 text-yellow-700 px-4 py-1.5 rounded-lg text-xs font-medium"
-                >
-                  Fix IDs
-                </button>
+                
                 <button
                   onClick={() => handleSync(account.account_id)}
                   disabled={syncing === account.account_id}
