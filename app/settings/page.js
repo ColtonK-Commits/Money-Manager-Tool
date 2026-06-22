@@ -4,6 +4,7 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
+import { signOut } from 'next-auth/react';
 
 export default function SettingsPage() {
   const [categories, setCategories] = useState([]);
@@ -336,6 +337,27 @@ async function handleMerge() {
             </button>
           </div>
         </div>
+      </div>
+
+{/* 6. Account */}
+      <div style={cardStyle}>
+        <p style={sectionTitle}>Account</p>
+        <p style={sectionSubtitle}>Sign out of your account on this device</p>
+        <button
+          onClick={() => signOut({ callbackUrl: '/login' })}
+          style={{
+            fontSize: '13px',
+            padding: '7px 18px',
+            borderRadius: '8px',
+            border: '0.5px solid #fca5a5',
+            backgroundColor: '#fff7f7',
+            color: '#b91c1c',
+            cursor: 'pointer',
+            fontWeight: '500',
+          }}
+        >
+          Sign out
+        </button>
       </div>
 
       {/* Confirm merge modal */}
