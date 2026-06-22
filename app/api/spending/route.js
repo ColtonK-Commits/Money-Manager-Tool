@@ -1,12 +1,9 @@
 // app/api/spending/route.js
 
-import Database from 'better-sqlite3';
-import path from 'path';
 import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '../auth/[...nextauth]/route';
-
-const db = new Database(path.join(process.cwd(), 'money_manager.db'));
+import sql from '../../../lib/db';
 
 async function getUserId() {
   const session = await getServerSession(authOptions);
@@ -30,15 +27,15 @@ export async function GET(request) {
       );
     }
 
-    const rows = db.prepare(`
+    const rows = await sql`
       SELECT
         category,
-        ROUND(-SUM(amount), 2) AS total_spent
+        ROUND(-SUM(amount)::numeric, 2) AS total_spent
       FROM transactions
       WHERE
-        transaction_date >= ?
-        AND transaction_date <= ?
-        AND user_id = ?
+        transaction_date >= ${start}
+        AND transaction_date <= ${end}
+        AND user_id = ${userId}
         AND category IS NOT NULL
         AND category != ''
         AND category != 'Transfer'
@@ -47,9 +44,9 @@ export async function GET(request) {
         AND is_original_split != 1
       GROUP BY category
       ORDER BY total_spent DESC
-    `).all(start, end, userId);
+    `;
 
-    return NextResponse.json(rows);
+    return NextResponse.json(rows.map(r => ({ ...r, total_spent: parseFloat(r.total_spent) })));
   } catch (error) {
     console.error('GET /api/spending error:', error);
     return NextResponse.json({ error: 'Failed to fetch spending data' }, { status: 500 });
