@@ -1,11 +1,8 @@
-import Database from 'better-sqlite3';
-import path from 'path';
 import { NextResponse } from 'next/server';
 import { randomUUID } from 'crypto';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '../auth/[...nextauth]/route';
-
-const db = new Database(path.join(process.cwd(), 'money_manager.db'));
+import sql from '../../../lib/db';
 
 async function getUserId() {
   const session = await getServerSession(authOptions);
@@ -21,33 +18,33 @@ export async function GET(request) {
     const { searchParams } = new URL(request.url);
 
     if (searchParams.get('accounts') === 'true') {
-      const accounts = db.prepare(`
+      const accounts = await sql`
         SELECT DISTINCT account FROM transactions
         WHERE account IS NOT NULL
-        AND user_id = ?
+        AND user_id = ${userId}
         ORDER BY account ASC
-      `).all(userId);
+      `;
       return NextResponse.json(accounts.map(a => a.account));
     }
 
     if (searchParams.get('categories') === 'true') {
-      const categories = db.prepare(`
+      const categories = await sql`
         SELECT DISTINCT category FROM transactions
         WHERE category IS NOT NULL
-        AND user_id = ?
+        AND user_id = ${userId}
         ORDER BY category ASC
-      `).all(userId);
+      `;
       return NextResponse.json(categories.map(c => c.category));
     }
 
-    const transactions = db.prepare(`
+    const transactions = await sql`
       SELECT * FROM transactions
-      WHERE user_id = ?
+      WHERE user_id = ${userId}
       ORDER BY transaction_date DESC,
         COALESCE(split_group_id, CAST(id AS TEXT)) ASC,
         is_original_split DESC,
         id ASC
-    `).all(userId);
+    `;
 
     return NextResponse.json(transactions);
   } catch (error) {
@@ -68,9 +65,10 @@ export async function PATCH(request) {
     if (action === 'split') {
       const { splits } = body;
 
-      const original = db.prepare(`
-        SELECT * FROM transactions WHERE id = ? AND user_id = ?
-      `).get(id, userId);
+      const rows = await sql`
+        SELECT * FROM transactions WHERE id = ${id} AND user_id = ${userId}
+      `;
+      const original = rows[0];
       if (!original) return NextResponse.json({ error: 'Transaction not found' }, { status: 404 });
 
       const originalAmount = Math.abs(original.amount);
@@ -84,77 +82,69 @@ export async function PATCH(request) {
 
       const splitGroupId = randomUUID();
 
-      db.transaction(() => {
-        db.prepare(`
-          UPDATE transactions
-          SET is_original_split = 1, split_group_id = ?
-          WHERE id = ? AND user_id = ?
-        `).run(splitGroupId, id, userId);
+      await sql`
+        UPDATE transactions
+        SET is_original_split = 1, split_group_id = ${splitGroupId}
+        WHERE id = ${id} AND user_id = ${userId}
+      `;
 
-        for (const split of splits) {
-          const splitAmount = original.amount < 0
-            ? -Math.abs(parseFloat(split.amount))
-            : Math.abs(parseFloat(split.amount));
-          db.prepare(`
-            INSERT INTO transactions (
-              transaction_date, post_date, description, custom_description,
-              category, type, amount, memo, account, split_group_id, is_original_split, user_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
-          `).run(
-            original.transaction_date,
-            original.post_date,
-            original.description,
-            split.custom_description ?? original.custom_description ?? null,
-            split.category ?? null,
-            original.type,
-            splitAmount,
-            split.memo ?? original.memo ?? null,
-            original.account,
-            splitGroupId,
-            userId
-          );
-        }
-      })();
+      for (const split of splits) {
+        const splitAmount = original.amount < 0
+          ? -Math.abs(parseFloat(split.amount))
+          : Math.abs(parseFloat(split.amount));
+        await sql`
+          INSERT INTO transactions (
+            transaction_date, post_date, description, custom_description,
+            category, type, amount, memo, account, split_group_id, is_original_split, user_id
+          ) VALUES (
+            ${original.transaction_date}, ${original.post_date}, ${original.description},
+            ${split.custom_description ?? original.custom_description ?? null},
+            ${split.category ?? null}, ${original.type}, ${splitAmount},
+            ${split.memo ?? original.memo ?? null}, ${original.account},
+            ${splitGroupId}, ${0}, ${userId}
+          )
+        `;
+      }
 
       return NextResponse.json({ success: true });
     }
 
     // --- Unsplit a transaction ---
     if (action === 'unsplit') {
-      const original = db.prepare(`
-        SELECT * FROM transactions WHERE id = ? AND user_id = ?
-      `).get(id, userId);
+      const rows = await sql`
+        SELECT * FROM transactions WHERE id = ${id} AND user_id = ${userId}
+      `;
+      const original = rows[0];
       if (!original || !original.split_group_id) {
         return NextResponse.json({ error: 'Transaction is not split' }, { status: 400 });
       }
 
-      db.transaction(() => {
-        db.prepare(`
-          DELETE FROM transactions
-          WHERE split_group_id = ? AND is_original_split = 0 AND user_id = ?
-        `).run(original.split_group_id, userId);
+      await sql`
+        DELETE FROM transactions
+        WHERE split_group_id = ${original.split_group_id}
+        AND is_original_split = 0 AND user_id = ${userId}
+      `;
 
-        db.prepare(`
-          UPDATE transactions
-          SET is_original_split = 0, split_group_id = NULL
-          WHERE id = ? AND user_id = ?
-        `).run(id, userId);
-      })();
+      await sql`
+        UPDATE transactions
+        SET is_original_split = 0, split_group_id = NULL
+        WHERE id = ${id} AND user_id = ${userId}
+      `;
 
       return NextResponse.json({ success: true });
     }
 
     // --- Regular update ---
-    db.prepare(`
+    await sql`
       UPDATE transactions
       SET
-        custom_description = ?,
-        custom_label = ?,
-        category = ?,
-        type = ?,
-        memo = ?
-      WHERE id = ? AND user_id = ?
-    `).run(clean(custom_description), clean(custom_label), clean(category), clean(type), clean(memo), id, userId);
+        custom_description = ${clean(custom_description)},
+        custom_label = ${clean(custom_label)},
+        category = ${clean(category)},
+        type = ${clean(type)},
+        memo = ${clean(memo)}
+      WHERE id = ${id} AND user_id = ${userId}
+    `;
 
     return NextResponse.json({ success: true });
   } catch (error) {
@@ -179,29 +169,16 @@ export async function POST(request) {
       account,
     } = body;
 
-    db.prepare(`
+    await sql`
       INSERT INTO transactions (
-        transaction_date,
-        post_date,
-        description,
-        category,
-        type,
-        amount,
-        memo,
-        account,
-        user_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      transaction_date,
-      post_date ?? null,
-      description,
-      category ?? null,
-      type ?? null,
-      amount,
-      memo ?? null,
-      account ?? 'manual',
-      userId
-    );
+        transaction_date, post_date, description, category,
+        type, amount, memo, account, user_id
+      ) VALUES (
+        ${transaction_date}, ${post_date ?? null}, ${description},
+        ${category ?? null}, ${type ?? null}, ${amount},
+        ${memo ?? null}, ${account ?? 'manual'}, ${userId}
+      )
+    `;
 
     return NextResponse.json({ success: true });
   } catch (error) {
@@ -217,34 +194,35 @@ export async function DELETE(request) {
     const { searchParams } = new URL(request.url);
     const id = searchParams.get('id');
 
-    const tx = db.prepare(`
+    const rows = await sql`
       SELECT split_group_id, is_original_split FROM transactions
-      WHERE id = ? AND user_id = ?
-    `).get(id, userId);
+      WHERE id = ${id} AND user_id = ${userId}
+    `;
+    const tx = rows[0];
 
     if (!tx) return NextResponse.json({ error: 'Transaction not found' }, { status: 404 });
 
-    if (tx?.split_group_id && tx?.is_original_split) {
-      db.prepare(`
-        DELETE FROM transactions WHERE split_group_id = ? AND user_id = ?
-      `).run(tx.split_group_id, userId);
-    } else if (tx?.split_group_id && tx?.is_original_split === 0) {
-      db.prepare(`DELETE FROM transactions WHERE id = ? AND user_id = ?`).run(id, userId);
+    if (tx.split_group_id && tx.is_original_split) {
+      await sql`
+        DELETE FROM transactions WHERE split_group_id = ${tx.split_group_id} AND user_id = ${userId}
+      `;
+    } else if (tx.split_group_id && tx.is_original_split === 0) {
+      await sql`DELETE FROM transactions WHERE id = ${id} AND user_id = ${userId}`;
 
-      const remainingChildren = db.prepare(`
-        SELECT COUNT(*) as count FROM transactions
-        WHERE split_group_id = ? AND is_original_split = 0 AND user_id = ?
-      `).get(tx.split_group_id, userId);
+      const remaining = await sql`
+        SELECT COUNT(*) AS count FROM transactions
+        WHERE split_group_id = ${tx.split_group_id} AND is_original_split = 0 AND user_id = ${userId}
+      `;
 
-      if (parseInt(remainingChildren.count) === 0) {
-        db.prepare(`
+      if (parseInt(remaining[0].count) === 0) {
+        await sql`
           UPDATE transactions
           SET is_original_split = 0, split_group_id = NULL
-          WHERE split_group_id = ? AND user_id = ?
-        `).run(tx.split_group_id, userId);
+          WHERE split_group_id = ${tx.split_group_id} AND user_id = ${userId}
+        `;
       }
     } else {
-      db.prepare(`DELETE FROM transactions WHERE id = ? AND user_id = ?`).run(id, userId);
+      await sql`DELETE FROM transactions WHERE id = ${id} AND user_id = ${userId}`;
     }
 
     return NextResponse.json({ success: true });

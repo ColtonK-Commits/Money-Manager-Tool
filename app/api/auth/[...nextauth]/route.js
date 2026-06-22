@@ -1,16 +1,7 @@
 import NextAuth from 'next-auth';
 import CredentialsProvider from 'next-auth/providers/credentials';
 import bcrypt from 'bcryptjs';
-import Database from 'better-sqlite3';
-import path from 'path';
-import { fileURLToPath } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-function getDb() {
-  return new Database(path.join(__dirname, '..', '..', '..', '..', 'money_manager.db'));
-}
+import sql from '../../../../lib/db';
 
 export const authOptions = {
   providers: [
@@ -21,9 +12,10 @@ export const authOptions = {
         password: { label: 'Password', type: 'password' },
       },
       async authorize(credentials) {
-        const db = getDb();
-        const user = db.prepare('SELECT * FROM users WHERE username = ?').get(credentials.username);
-        db.close();
+        const users = await sql`
+          SELECT * FROM users WHERE username = ${credentials.username}
+        `;
+        const user = users[0];
 
         if (!user) return null;
 

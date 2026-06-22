@@ -1,15 +1,6 @@
 import { NextResponse } from 'next/server';
 import bcrypt from 'bcryptjs';
-import Database from 'better-sqlite3';
-import path from 'path';
-import { fileURLToPath } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-function getDb() {
-  return new Database(path.join(__dirname, '..', '..', '..', '..', 'money_manager.db'));
-}
+import sql from '../../../../lib/db';
 
 export async function POST(request) {
   try {
@@ -23,17 +14,13 @@ export async function POST(request) {
       return NextResponse.json({ error: 'Password must be at least 6 characters' }, { status: 400 });
     }
 
-    const db = getDb();
-
-    const existingUser = db.prepare('SELECT id FROM users WHERE username = ?').get(username);
-    if (existingUser) {
-      db.close();
+    const existing = await sql`SELECT id FROM users WHERE username = ${username}`;
+    if (existing.length > 0) {
       return NextResponse.json({ error: 'Username already exists' }, { status: 400 });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
-    db.prepare('INSERT INTO users (username, password) VALUES (?, ?)').run(username, hashedPassword);
-    db.close();
+    await sql`INSERT INTO users (username, password) VALUES (${username}, ${hashedPassword})`;
 
     return NextResponse.json({ success: true }, { status: 201 });
   } catch (error) {
