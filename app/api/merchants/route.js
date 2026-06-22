@@ -1,10 +1,7 @@
-import Database from 'better-sqlite3';
-import path from 'path';
 import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '../auth/[...nextauth]/route';
-
-const db = new Database(path.join(process.cwd(), 'money_manager.db'));
+import sql from '../../../lib/db';
 
 async function getUserId() {
   const session = await getServerSession(authOptions);
@@ -17,11 +14,11 @@ export async function GET() {
     const userId = await getUserId();
     if (!userId) return NextResponse.json({ error: 'Unauthorised' }, { status: 401 });
 
-    const merchants = db.prepare(`
+    const merchants = await sql`
       SELECT * FROM merchants
-      WHERE user_id = ?
+      WHERE user_id = ${userId}
       ORDER BY rule_name ASC
-    `).all(userId);
+    `;
     return NextResponse.json(merchants);
   } catch (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
@@ -35,11 +32,11 @@ export async function POST(request) {
 
     const { rule_name, pattern } = await request.json();
 
-    const transactions = db.prepare(`
+    const transactions = await sql`
       SELECT id, description FROM transactions
-      WHERE LOWER(description) LIKE LOWER(?)
-      AND user_id = ?
-    `).all(`%${pattern}%`, userId);
+      WHERE LOWER(description) LIKE LOWER(${`%${pattern}%`})
+      AND user_id = ${userId}
+    `;
 
     const autoApproved = [];
     const needsReview = [];
@@ -69,32 +66,38 @@ export async function PATCH(request) {
 
     // Update existing merchant rule
     if (body.id && !body.approvedIds) {
-      db.prepare(`
-        UPDATE merchants SET rule_name = ?, pattern = ?
-        WHERE id = ? AND user_id = ?
-      `).run(body.rule_name, body.pattern, body.id, userId);
+      await sql`
+        UPDATE merchants SET rule_name = ${body.rule_name}, pattern = ${body.pattern}
+        WHERE id = ${body.id} AND user_id = ${userId}
+      `;
       return NextResponse.json({ success: true });
     }
 
     const { rule_name, pattern, approvedIds } = body;
 
-    const result = db.prepare(`
+    const result = await sql`
       INSERT INTO merchants (rule_name, pattern, user_id)
-      VALUES (?, ?, ?)
-    `).run(rule_name, pattern, userId);
+      VALUES (${rule_name}, ${pattern}, ${userId})
+      RETURNING id
+    `;
 
-    const merchantId = result.lastInsertRowid;
+    const merchantId = result[0].id;
 
     for (const id of approvedIds) {
-      db.prepare(`
-        INSERT INTO merchant_approvals (merchant_id, original_description, approved)
-        VALUES (?, (SELECT description FROM transactions WHERE id = ? AND user_id = ?), 1)
-      `).run(merchantId, id, userId);
+      const txRows = await sql`
+        SELECT description FROM transactions WHERE id = ${id} AND user_id = ${userId}
+      `;
+      const description = txRows[0]?.description ?? null;
 
-      db.prepare(`
-        UPDATE transactions SET custom_description = ?
-        WHERE id = ? AND user_id = ?
-      `).run(rule_name, id, userId);
+      await sql`
+        INSERT INTO merchant_approvals (merchant_id, original_description, approved)
+        VALUES (${merchantId}, ${description}, 1)
+      `;
+
+      await sql`
+        UPDATE transactions SET custom_description = ${rule_name}
+        WHERE id = ${id} AND user_id = ${userId}
+      `;
     }
 
     return NextResponse.json({ success: true });
@@ -111,29 +114,27 @@ export async function DELETE(request) {
     const { searchParams } = new URL(request.url);
     const id = searchParams.get('id');
 
-    // Verify the merchant rule belongs to this user
-    const merchant = db.prepare(`SELECT id FROM merchants WHERE id = ? AND user_id = ?`).get(id, userId);
-    if (!merchant) return NextResponse.json({ error: 'Merchant rule not found' }, { status: 404 });
+    const merchant = await sql`SELECT id FROM merchants WHERE id = ${id} AND user_id = ${userId}`;
+    if (merchant.length === 0) return NextResponse.json({ error: 'Merchant rule not found' }, { status: 404 });
 
-    const approvals = db.prepare(`
+    const approvals = await sql`
       SELECT original_description FROM merchant_approvals
-      WHERE merchant_id = ? AND approved = 1
-    `).all(id);
+      WHERE merchant_id = ${id} AND approved = 1
+    `;
 
     for (const approval of approvals) {
-      db.prepare(`
+      const ruleName = await sql`SELECT rule_name FROM merchants WHERE id = ${id}`;
+      await sql`
         UPDATE transactions
         SET custom_description = NULL
-        WHERE custom_description = (
-          SELECT rule_name FROM merchants WHERE id = ?
-        )
-        AND description = ?
-        AND user_id = ?
-      `).run(id, approval.original_description, userId);
+        WHERE custom_description = ${ruleName[0].rule_name}
+        AND description = ${approval.original_description}
+        AND user_id = ${userId}
+      `;
     }
 
-    db.prepare(`DELETE FROM merchant_approvals WHERE merchant_id = ?`).run(id);
-    db.prepare(`DELETE FROM merchants WHERE id = ? AND user_id = ?`).run(id, userId);
+    await sql`DELETE FROM merchant_approvals WHERE merchant_id = ${id}`;
+    await sql`DELETE FROM merchants WHERE id = ${id} AND user_id = ${userId}`;
 
     return NextResponse.json({ success: true });
   } catch (error) {
