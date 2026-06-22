@@ -359,21 +359,22 @@ case 'biggest_transactions': {
         return NextResponse.json(rows);
       }
 
-      // --- Income by source ---
+// --- Income by source ---
       case 'income_by_source': {
         const rows = db.prepare(`
           SELECT
-            strftime('%Y-%m', transaction_date) AS month,
             COALESCE(custom_description, description) AS source,
             ROUND(SUM(amount), 2) AS amount,
-            transaction_date
+            MAX(transaction_date) AS transaction_date,
+            COUNT(*) AS transaction_count
           FROM transactions
           WHERE user_id = ?
             AND amount > 0
             AND category = 'Income'
             AND transaction_date >= COALESCE(?, DATE('now', '-12 months'))
             AND transaction_date <= COALESCE(?, DATE('now'))
-          ORDER BY transaction_date DESC
+          GROUP BY COALESCE(custom_description, description)
+          ORDER BY amount DESC
         `).all(userId, start, end);
         return NextResponse.json(rows);
       }
