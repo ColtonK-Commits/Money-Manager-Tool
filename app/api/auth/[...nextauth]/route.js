@@ -12,7 +12,7 @@ function getDb() {
   return new Database(path.join(__dirname, '..', '..', '..', '..', 'money_manager.db'));
 }
 
-const handler = NextAuth({
+export const authOptions = {
   providers: [
     CredentialsProvider({
       name: 'Credentials',
@@ -56,6 +56,7 @@ const handler = NextAuth({
       return session;
     },
   },
-});
+};
 
+const handler = NextAuth(authOptions);
 export { handler as GET, handler as POST };

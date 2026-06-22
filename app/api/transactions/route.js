@@ -2,19 +2,31 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import { NextResponse } from 'next/server';
 import { randomUUID } from 'crypto';
+import { getServerSession } from 'next-auth';
+import { authOptions } from '../auth/[...nextauth]/route';
 
 const db = new Database(path.join(process.cwd(), 'money_manager.db'));
 
+async function getUserId() {
+  const session = await getServerSession(authOptions);
+  if (!session?.user?.id) return null;
+  return session.user.id;
+}
+
 export async function GET(request) {
   try {
+    const userId = await getUserId();
+    if (!userId) return NextResponse.json({ error: 'Unauthorised' }, { status: 401 });
+
     const { searchParams } = new URL(request.url);
 
     if (searchParams.get('accounts') === 'true') {
       const accounts = db.prepare(`
         SELECT DISTINCT account FROM transactions
         WHERE account IS NOT NULL
+        AND user_id = ?
         ORDER BY account ASC
-      `).all();
+      `).all(userId);
       return NextResponse.json(accounts.map(a => a.account));
     }
 
@@ -22,18 +34,20 @@ export async function GET(request) {
       const categories = db.prepare(`
         SELECT DISTINCT category FROM transactions
         WHERE category IS NOT NULL
+        AND user_id = ?
         ORDER BY category ASC
-      `).all();
+      `).all(userId);
       return NextResponse.json(categories.map(c => c.category));
     }
 
-const transactions = db.prepare(`
+    const transactions = db.prepare(`
       SELECT * FROM transactions
-      ORDER BY transaction_date DESC, 
+      WHERE user_id = ?
+      ORDER BY transaction_date DESC,
         COALESCE(split_group_id, CAST(id AS TEXT)) ASC,
         is_original_split DESC,
         id ASC
-    `).all();
+    `).all(userId);
 
     return NextResponse.json(transactions);
   } catch (error) {
@@ -43,43 +57,49 @@ const transactions = db.prepare(`
 
 export async function PATCH(request) {
   try {
+    const userId = await getUserId();
+    if (!userId) return NextResponse.json({ error: 'Unauthorised' }, { status: 401 });
+
     const body = await request.json();
     const { id, custom_description, custom_label, category, type, memo, action } = body;
     const clean = v => (v === '' || v === undefined) ? null : v;
 
     // --- Split a transaction ---
     if (action === 'split') {
-      const { splits } = body; // [{ amount, category }, ...]
+      const { splits } = body;
 
-      // Validate splits sum to original amount
-      const original = db.prepare(`SELECT * FROM transactions WHERE id = ?`).get(id);
+      const original = db.prepare(`
+        SELECT * FROM transactions WHERE id = ? AND user_id = ?
+      `).get(id, userId);
       if (!original) return NextResponse.json({ error: 'Transaction not found' }, { status: 404 });
 
       const originalAmount = Math.abs(original.amount);
       const splitTotal = splits.reduce((sum, s) => sum + Math.abs(parseFloat(s.amount)), 0);
 
       if (Math.abs(splitTotal - originalAmount) > 0.01) {
-        return NextResponse.json({ error: `Split amounts (${splitTotal.toFixed(2)}) must equal original amount (${originalAmount.toFixed(2)})` }, { status: 400 });
+        return NextResponse.json({
+          error: `Split amounts (${splitTotal.toFixed(2)}) must equal original amount (${originalAmount.toFixed(2)})`
+        }, { status: 400 });
       }
 
       const splitGroupId = randomUUID();
 
       db.transaction(() => {
-        // Mark original as split
         db.prepare(`
-          UPDATE transactions 
+          UPDATE transactions
           SET is_original_split = 1, split_group_id = ?
-          WHERE id = ?
-        `).run(splitGroupId, id);
+          WHERE id = ? AND user_id = ?
+        `).run(splitGroupId, id, userId);
 
-        // Insert split rows
         for (const split of splits) {
-          const splitAmount = original.amount < 0 ? -Math.abs(parseFloat(split.amount)) : Math.abs(parseFloat(split.amount));
+          const splitAmount = original.amount < 0
+            ? -Math.abs(parseFloat(split.amount))
+            : Math.abs(parseFloat(split.amount));
           db.prepare(`
             INSERT INTO transactions (
               transaction_date, post_date, description, custom_description,
-              category, type, amount, memo, account, split_group_id, is_original_split
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+              category, type, amount, memo, account, split_group_id, is_original_split, user_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
           `).run(
             original.transaction_date,
             original.post_date,
@@ -90,7 +110,8 @@ export async function PATCH(request) {
             splitAmount,
             split.memo ?? original.memo ?? null,
             original.account,
-            splitGroupId
+            splitGroupId,
+            userId
           );
         }
       })();
@@ -100,24 +121,24 @@ export async function PATCH(request) {
 
     // --- Unsplit a transaction ---
     if (action === 'unsplit') {
-      const original = db.prepare(`SELECT * FROM transactions WHERE id = ?`).get(id);
+      const original = db.prepare(`
+        SELECT * FROM transactions WHERE id = ? AND user_id = ?
+      `).get(id, userId);
       if (!original || !original.split_group_id) {
         return NextResponse.json({ error: 'Transaction is not split' }, { status: 400 });
       }
 
       db.transaction(() => {
-        // Delete the split rows
         db.prepare(`
-          DELETE FROM transactions 
-          WHERE split_group_id = ? AND is_original_split = 0
-        `).run(original.split_group_id);
+          DELETE FROM transactions
+          WHERE split_group_id = ? AND is_original_split = 0 AND user_id = ?
+        `).run(original.split_group_id, userId);
 
-        // Restore original
         db.prepare(`
-          UPDATE transactions 
+          UPDATE transactions
           SET is_original_split = 0, split_group_id = NULL
-          WHERE id = ?
-        `).run(id);
+          WHERE id = ? AND user_id = ?
+        `).run(id, userId);
       })();
 
       return NextResponse.json({ success: true });
@@ -132,8 +153,8 @@ export async function PATCH(request) {
         category = ?,
         type = ?,
         memo = ?
-      WHERE id = ?
-    `).run(clean(custom_description), clean(custom_label), clean(category), clean(type), clean(memo), id);
+      WHERE id = ? AND user_id = ?
+    `).run(clean(custom_description), clean(custom_label), clean(category), clean(type), clean(memo), id, userId);
 
     return NextResponse.json({ success: true });
   } catch (error) {
@@ -143,6 +164,9 @@ export async function PATCH(request) {
 
 export async function POST(request) {
   try {
+    const userId = await getUserId();
+    if (!userId) return NextResponse.json({ error: 'Unauthorised' }, { status: 401 });
+
     const body = await request.json();
     const {
       transaction_date,
@@ -164,8 +188,9 @@ export async function POST(request) {
         type,
         amount,
         memo,
-        account
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        account,
+        user_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       transaction_date,
       post_date ?? null,
@@ -174,7 +199,8 @@ export async function POST(request) {
       type ?? null,
       amount,
       memo ?? null,
-      account ?? 'manual'
+      account ?? 'manual',
+      userId
     );
 
     return NextResponse.json({ success: true });
@@ -185,35 +211,40 @@ export async function POST(request) {
 
 export async function DELETE(request) {
   try {
+    const userId = await getUserId();
+    if (!userId) return NextResponse.json({ error: 'Unauthorised' }, { status: 401 });
+
     const { searchParams } = new URL(request.url);
     const id = searchParams.get('id');
 
-    const tx = db.prepare(`SELECT split_group_id, is_original_split FROM transactions WHERE id = ?`).get(id);
+    const tx = db.prepare(`
+      SELECT split_group_id, is_original_split FROM transactions
+      WHERE id = ? AND user_id = ?
+    `).get(id, userId);
+
+    if (!tx) return NextResponse.json({ error: 'Transaction not found' }, { status: 404 });
 
     if (tx?.split_group_id && tx?.is_original_split) {
-      // Deleting the original — delete all splits too
-      db.prepare(`DELETE FROM transactions WHERE split_group_id = ?`).run(tx.split_group_id);
+      db.prepare(`
+        DELETE FROM transactions WHERE split_group_id = ? AND user_id = ?
+      `).run(tx.split_group_id, userId);
     } else if (tx?.split_group_id && tx?.is_original_split === 0) {
-      // Deleting a split child
-      db.prepare(`DELETE FROM transactions WHERE id = ?`).run(id);
+      db.prepare(`DELETE FROM transactions WHERE id = ? AND user_id = ?`).run(id, userId);
 
-      // Check if any children remain
       const remainingChildren = db.prepare(`
-        SELECT COUNT(*) as count FROM transactions 
-        WHERE split_group_id = ? AND is_original_split = 0
-      `).get(tx.split_group_id);
+        SELECT COUNT(*) as count FROM transactions
+        WHERE split_group_id = ? AND is_original_split = 0 AND user_id = ?
+      `).get(tx.split_group_id, userId);
 
-if (parseInt(remainingChildren.count) === 0) {
-        // No children left — restore the original
-        const restoreResult = db.prepare(`
-          UPDATE transactions 
+      if (parseInt(remainingChildren.count) === 0) {
+        db.prepare(`
+          UPDATE transactions
           SET is_original_split = 0, split_group_id = NULL
-          WHERE split_group_id = ?
-        `).run(tx.split_group_id);
+          WHERE split_group_id = ? AND user_id = ?
+        `).run(tx.split_group_id, userId);
       }
     } else {
-      // Regular delete
-      db.prepare(`DELETE FROM transactions WHERE id = ?`).run(id);
+      db.prepare(`DELETE FROM transactions WHERE id = ? AND user_id = ?`).run(id, userId);
     }
 
     return NextResponse.json({ success: true });
