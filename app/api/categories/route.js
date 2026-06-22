@@ -1,10 +1,7 @@
-import Database from 'better-sqlite3';
-import path from 'path';
 import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '../auth/[...nextauth]/route';
-
-const db = new Database(path.join(process.cwd(), 'money_manager.db'));
+import sql from '../../../lib/db';
 
 async function getUserId() {
   const session = await getServerSession(authOptions);
@@ -17,11 +14,11 @@ export async function GET() {
     const userId = await getUserId();
     if (!userId) return NextResponse.json({ error: 'Unauthorised' }, { status: 401 });
 
-    const categories = db.prepare(`
+    const categories = await sql`
       SELECT * FROM categories
-      WHERE user_id = ?
+      WHERE user_id = ${userId}
       ORDER BY name ASC
-    `).all(userId);
+    `;
 
     return NextResponse.json(categories);
   } catch (error) {
@@ -36,10 +33,11 @@ export async function POST(request) {
 
     const { name, colour } = await request.json();
 
-    db.prepare(`
-      INSERT OR IGNORE INTO categories (name, colour, user_id)
-      VALUES (?, ?, ?)
-    `).run(name, colour, userId);
+    await sql`
+      INSERT INTO categories (name, colour, user_id)
+      VALUES (${name}, ${colour}, ${userId})
+      ON CONFLICT (name, user_id) DO NOTHING
+    `;
 
     return NextResponse.json({ success: true });
   } catch (error) {
