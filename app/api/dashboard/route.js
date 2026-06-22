@@ -1,10 +1,7 @@
-import Database from 'better-sqlite3';
-import path from 'path';
 import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '../auth/[...nextauth]/route';
-
-const db = new Database(path.join(process.cwd(), 'money_manager.db'));
+import sql from '../../../lib/db';
 
 async function getUserId() {
   const session = await getServerSession(authOptions);
@@ -12,7 +9,6 @@ async function getUserId() {
   return session.user.id;
 }
 
-// Categories that should have end-of-month projections
 const PROJECTION_CATEGORIES = new Set([
   'Entertainment',
   'Food & Drink',
@@ -35,35 +31,34 @@ export async function GET(request) {
 
     // Return list of all available months for the dropdown
     if (searchParams.get('months') === 'true') {
-      const months = db.prepare(`
-        SELECT DISTINCT strftime('%Y-%m', transaction_date) AS month
+      const months = await sql`
+        SELECT DISTINCT TO_CHAR(transaction_date::date, 'YYYY-MM') AS month
         FROM transactions
-        WHERE user_id = ?
+        WHERE user_id = ${userId}
         ORDER BY month DESC
-      `).all(userId).map(r => r.month);
-      return NextResponse.json(months);
+      `;
+      return NextResponse.json(months.map(r => r.month));
     }
 
     if (!month) {
       return NextResponse.json({ error: 'month parameter is required' }, { status: 400 });
     }
 
-    // Start and end of the selected month
     const [year, mon] = month.split('-').map(Number);
     const start = `${month}-01`;
     const lastDay = new Date(year, mon, 0).getDate();
     const end = `${month}-${String(lastDay).padStart(2, '0')}`;
 
     // Spending by category for the selected month
-    const byCategory = db.prepare(`
+    const byCategory = await sql`
       SELECT
         category,
-        ROUND(-SUM(amount), 2) AS total_spent
+        ROUND(-SUM(amount)::numeric, 2) AS total_spent
       FROM transactions
       WHERE
-        transaction_date >= ?
-        AND transaction_date <= ?
-        AND user_id = ?
+        transaction_date >= ${start}
+        AND transaction_date <= ${end}
+        AND user_id = ${userId}
         AND category IS NOT NULL
         AND category != ''
         AND category != 'Transfer'
@@ -72,14 +67,14 @@ export async function GET(request) {
         AND is_original_split != 1
       GROUP BY category
       ORDER BY total_spent DESC
-    `).all(start, end, userId);
+    `;
 
-    // Budgets for the selected month from monthly_budgets
-    const budgets = db.prepare(`
+    // Budgets for the selected month
+    const budgets = await sql`
       SELECT category, monthly_target
       FROM monthly_budgets
-      WHERE month = ? AND user_id = ?
-    `).all(month, userId);
+      WHERE month = ${month} AND user_id = ${userId}
+    `;
 
     const budgetMap = {};
     for (const b of budgets) {
@@ -87,89 +82,91 @@ export async function GET(request) {
     }
 
     // Category colours
-    const colours = db.prepare(`
+    const colours = await sql`
       SELECT name, colour FROM categories
-      WHERE user_id = ?
-    `).all(userId);
+      WHERE user_id = ${userId}
+    `;
 
     const colourMap = {};
     for (const c of colours) {
       colourMap[c.name] = c.colour;
     }
 
-    // Calculate projection for eligible categories
+    // Calculate projections
     const today = new Date();
     const isCurrentMonth = month === `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`;
     const dayOfMonth = today.getDate();
 
     const categoryData = byCategory.map(row => {
+      const totalSpent = parseFloat(row.total_spent);
       const shouldProject = isCurrentMonth && PROJECTION_CATEGORIES.has(row.category);
       let projected_spend = null;
 
       if (shouldProject && dayOfMonth > 0) {
-        const dailyAverage = row.total_spent / dayOfMonth;
+        const dailyAverage = totalSpent / dayOfMonth;
         projected_spend = Math.round(dailyAverage * lastDay * 100) / 100;
       }
 
       return {
         ...row,
+        total_spent: totalSpent,
         colour: colourMap[row.category] ?? '#d1d5db',
         monthly_target: budgetMap[row.category] ?? null,
         projected_spend,
       };
     });
 
-    // Monthly trend — last 12 months actual spending + budget
-    const trend = db.prepare(`
+    // Monthly trend — last 12 months
+    const trend = await sql`
       SELECT
-        strftime('%Y-%m', transaction_date) AS month,
-        ROUND(-SUM(amount), 2) AS total_spent
+        TO_CHAR(transaction_date::date, 'YYYY-MM') AS month,
+        ROUND(-SUM(amount)::numeric, 2) AS total_spent
       FROM transactions
       WHERE
-        user_id = ?
+        user_id = ${userId}
         AND category IS NOT NULL
         AND category != ''
         AND category != 'Transfer'
         AND category != 'Withdrawal'
         AND category != 'Income'
         AND is_original_split != 1
-        AND transaction_date >= DATE('now', '-12 months')
-      GROUP BY month
+        AND transaction_date >= (NOW() - INTERVAL '12 months')::date::text
+      GROUP BY TO_CHAR(transaction_date::date, 'YYYY-MM')
       ORDER BY month ASC
-    `).all(userId);
+    `;
 
-    const trendWithBudget = trend.map(row => {
-      const monthBudgets = db.prepare(`
+    const trendWithBudget = await Promise.all(trend.map(async row => {
+      const budgetRows = await sql`
         SELECT SUM(monthly_target) AS total_budget
         FROM monthly_budgets
-        WHERE month = ? AND user_id = ?
-      `).get(row.month, userId);
-
+        WHERE month = ${row.month} AND user_id = ${userId}
+      `;
       return {
         ...row,
-        total_budget: monthBudgets?.total_budget ?? 0,
+        total_spent: parseFloat(row.total_spent),
+        total_budget: parseFloat(budgetRows[0]?.total_budget ?? 0),
       };
-    });
+    }));
 
-    // Category trends — spending per category per month for last 12 months
-    const categoryTrends = db.prepare(`
+    // Category trends — last 12 months
+    const categoryTrends = await sql`
       SELECT
-        strftime('%Y-%m', transaction_date) AS month,
+        TO_CHAR(transaction_date::date, 'YYYY-MM') AS month,
         category,
-        ROUND(-SUM(amount), 2) AS total_spent
+        ROUND(-SUM(amount)::numeric, 2) AS total_spent
       FROM transactions
       WHERE
-        user_id = ?
+        user_id = ${userId}
         AND category IS NOT NULL
         AND category != ''
         AND category != 'Transfer'
         AND category != 'Withdrawal'
         AND category != 'Income'
         AND is_original_split != 1
-        AND transaction_date >= DATE('now', '-12 months')
-      GROUP BY month, category
+        AND transaction_date >= (NOW() - INTERVAL '12 months')::date::text
+      GROUP BY TO_CHAR(transaction_date::date, 'YYYY-MM'), category
       ORDER BY month ASC
-    `).all(userId);
+    `;
 
     const trendCategories = [...new Set(categoryTrends.map(r => r.category))].sort();
     const trendMonths = [...new Set(categoryTrends.map(r => r.month))].sort();
@@ -177,7 +174,7 @@ export async function GET(request) {
     const trendLookup = {};
     for (const row of categoryTrends) {
       if (!trendLookup[row.category]) trendLookup[row.category] = {};
-      trendLookup[row.category][row.month] = row.total_spent;
+      trendLookup[row.category][row.month] = parseFloat(row.total_spent);
     }
 
     return NextResponse.json({
