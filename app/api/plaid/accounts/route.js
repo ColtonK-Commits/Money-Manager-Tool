@@ -1,12 +1,9 @@
 // app/api/plaid/accounts/route.js
 
-import Database from 'better-sqlite3';
-import path from 'path';
 import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '../../auth/[...nextauth]/route';
-
-const db = new Database(path.join(process.cwd(), 'money_manager.db'));
+import sql from '../../../../lib/db';
 
 async function getUserId() {
   const session = await getServerSession(authOptions);
@@ -19,14 +16,14 @@ export async function GET() {
     const userId = await getUserId();
     if (!userId) return NextResponse.json({ error: 'Unauthorised' }, { status: 401 });
 
-    const accounts = db.prepare(`
+    const accounts = await sql`
       SELECT
         id, institution_name, account_name, account_type,
         account_subtype, account_id, created_at
       FROM linked_accounts
-      WHERE user_id = ?
+      WHERE user_id = ${userId}
       ORDER BY institution_name, account_name
-    `).all(userId);
+    `;
 
     return NextResponse.json(accounts);
   } catch (error) {
