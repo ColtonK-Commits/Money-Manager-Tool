@@ -1,12 +1,9 @@
 // app/api/settings/route.js
 
-import Database from 'better-sqlite3';
-import path from 'path';
 import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '../auth/[...nextauth]/route';
-
-const db = new Database(path.join(process.cwd(), 'money_manager.db'));
+import sql from '../../../lib/db';
 
 async function getUserId() {
   const session = await getServerSession(authOptions);
@@ -24,42 +21,35 @@ export async function GET(request) {
 
     // Get all categories
     if (type === 'categories') {
-      const categories = db.prepare(`
+      const categories = await sql`
         SELECT c.id, c.name, c.colour,
           COUNT(t.id) AS transaction_count
         FROM categories c
-        LEFT JOIN transactions t ON t.category = c.name AND t.user_id = ?
-        WHERE c.user_id = ?
-        GROUP BY c.id
+        LEFT JOIN transactions t ON t.category = c.name AND t.user_id = ${userId}
+        WHERE c.user_id = ${userId}
+        GROUP BY c.id, c.name, c.colour
         ORDER BY c.name ASC
-      `).all(userId, userId);
+      `;
       return NextResponse.json(categories);
     }
 
     // Get all linked accounts
     if (type === 'accounts') {
-      const accounts = db.prepare(`
+      const accounts = await sql`
         SELECT id, institution_name, account_name, account_type, account_subtype, account_id, created_at
         FROM linked_accounts
-        WHERE user_id = ?
+        WHERE user_id = ${userId}
         ORDER BY institution_name, account_name
-      `).all(userId);
+      `;
       return NextResponse.json(accounts);
     }
 
     // Get preferences — keyed per user using prefix
     if (type === 'preferences') {
-      db.prepare(`
-        CREATE TABLE IF NOT EXISTS preferences (
-          key TEXT PRIMARY KEY,
-          value TEXT NOT NULL
-        )
-      `).run();
-
-      const prefs = db.prepare(`
+      const prefs = await sql`
         SELECT key, value FROM preferences
-        WHERE key LIKE ?
-      `).all(`${userId}_%`);
+        WHERE key LIKE ${`${userId}_%`}
+      `;
 
       const prefMap = { currency_symbol: '$', default_date_range: 'current_month' };
       for (const p of prefs) {
@@ -89,11 +79,9 @@ export async function POST(request) {
       const { old_name, new_name } = body;
       if (!old_name || !new_name) return NextResponse.json({ error: 'old_name and new_name required' }, { status: 400 });
 
-      db.transaction(() => {
-        db.prepare(`UPDATE transactions SET category = ? WHERE category = ? AND user_id = ?`).run(new_name, old_name, userId);
-        db.prepare(`UPDATE monthly_budgets SET category = ? WHERE category = ? AND user_id = ?`).run(new_name, old_name, userId);
-        db.prepare(`UPDATE categories SET name = ? WHERE name = ? AND user_id = ?`).run(new_name, old_name, userId);
-      })();
+      await sql`UPDATE transactions SET category = ${new_name} WHERE category = ${old_name} AND user_id = ${userId}`;
+      await sql`UPDATE monthly_budgets SET category = ${new_name} WHERE category = ${old_name} AND user_id = ${userId}`;
+      await sql`UPDATE categories SET name = ${new_name} WHERE name = ${old_name} AND user_id = ${userId}`;
 
       return NextResponse.json({ success: true });
     }
@@ -101,7 +89,7 @@ export async function POST(request) {
     // Update category colour
     if (action === 'update_colour') {
       const { name, colour } = body;
-      db.prepare(`UPDATE categories SET colour = ? WHERE name = ? AND user_id = ?`).run(colour, name, userId);
+      await sql`UPDATE categories SET colour = ${colour} WHERE name = ${name} AND user_id = ${userId}`;
       return NextResponse.json({ success: true });
     }
 
@@ -110,19 +98,17 @@ export async function POST(request) {
       const { source, target } = body;
       if (!source || !target) return NextResponse.json({ error: 'source and target required' }, { status: 400 });
 
-      db.transaction(() => {
-        db.prepare(`UPDATE transactions SET category = ? WHERE category = ? AND user_id = ?`).run(target, source, userId);
-        db.prepare(`
-          UPDATE monthly_budgets SET category = ?
-          WHERE category = ? AND user_id = ?
-          AND NOT EXISTS (
-            SELECT 1 FROM monthly_budgets
-            WHERE category = ? AND month = monthly_budgets.month AND user_id = ?
-          )
-        `).run(target, source, userId, target, userId);
-        db.prepare(`DELETE FROM monthly_budgets WHERE category = ? AND user_id = ?`).run(source, userId);
-        db.prepare(`DELETE FROM categories WHERE name = ? AND user_id = ?`).run(source, userId);
-      })();
+      await sql`UPDATE transactions SET category = ${target} WHERE category = ${source} AND user_id = ${userId}`;
+      await sql`
+        UPDATE monthly_budgets SET category = ${target}
+        WHERE category = ${source} AND user_id = ${userId}
+        AND NOT EXISTS (
+          SELECT 1 FROM monthly_budgets mb2
+          WHERE mb2.category = ${target} AND mb2.month = monthly_budgets.month AND mb2.user_id = ${userId}
+        )
+      `;
+      await sql`DELETE FROM monthly_budgets WHERE category = ${source} AND user_id = ${userId}`;
+      await sql`DELETE FROM categories WHERE name = ${source} AND user_id = ${userId}`;
 
       return NextResponse.json({ success: true });
     }
@@ -130,56 +116,44 @@ export async function POST(request) {
     // Delete a category
     if (action === 'delete_category') {
       const { name } = body;
-      db.transaction(() => {
-        db.prepare(`UPDATE transactions SET category = NULL WHERE category = ? AND user_id = ?`).run(name, userId);
-        db.prepare(`DELETE FROM monthly_budgets WHERE category = ? AND user_id = ?`).run(name, userId);
-        db.prepare(`DELETE FROM categories WHERE name = ? AND user_id = ?`).run(name, userId);
-      })();
+      await sql`UPDATE transactions SET category = NULL WHERE category = ${name} AND user_id = ${userId}`;
+      await sql`DELETE FROM monthly_budgets WHERE category = ${name} AND user_id = ${userId}`;
+      await sql`DELETE FROM categories WHERE name = ${name} AND user_id = ${userId}`;
       return NextResponse.json({ success: true });
     }
 
     // Delete a linked account
     if (action === 'delete_account') {
       const { account_id } = body;
-      db.transaction(() => {
-        db.prepare(`DELETE FROM transactions WHERE account = ? AND user_id = ?`).run(account_id, userId);
-        db.prepare(`DELETE FROM linked_accounts WHERE account_id = ? AND user_id = ?`).run(account_id, userId);
-      })();
+      await sql`DELETE FROM transactions WHERE account = ${account_id} AND user_id = ${userId}`;
+      await sql`DELETE FROM linked_accounts WHERE account_id = ${account_id} AND user_id = ${userId}`;
       return NextResponse.json({ success: true });
     }
 
-    // Clear all sandbox/test data (Plaid transactions only)
+    // Clear all sandbox/test data
     if (action === 'clear_sandbox_data') {
-      db.transaction(() => {
-        db.prepare(`
-          DELETE FROM transactions
-          WHERE user_id = ?
-          AND account IN (SELECT account_id FROM linked_accounts WHERE user_id = ?)
-        `).run(userId, userId);
-        db.prepare(`UPDATE linked_accounts SET cursor = NULL WHERE user_id = ?`).run(userId);
-      })();
+      await sql`
+        DELETE FROM transactions
+        WHERE user_id = ${userId}
+        AND account IN (SELECT account_id FROM linked_accounts WHERE user_id = ${userId})
+      `;
+      await sql`UPDATE linked_accounts SET cursor = NULL WHERE user_id = ${userId}`;
       return NextResponse.json({ success: true });
     }
 
-    // Reset Plaid cursors only (keeps transactions)
+    // Reset Plaid cursors only
     if (action === 'reset_cursors') {
-      db.prepare(`UPDATE linked_accounts SET cursor = NULL WHERE user_id = ?`).run(userId);
+      await sql`UPDATE linked_accounts SET cursor = NULL WHERE user_id = ${userId}`;
       return NextResponse.json({ success: true });
     }
 
-    // Save a preference — keyed per user using prefix
+    // Save a preference
     if (action === 'save_preference') {
       const { key, value } = body;
-      db.prepare(`
-        CREATE TABLE IF NOT EXISTS preferences (
-          key TEXT PRIMARY KEY,
-          value TEXT NOT NULL
-        )
-      `).run();
-      db.prepare(`
-        INSERT INTO preferences (key, value) VALUES (?, ?)
-        ON CONFLICT(key) DO UPDATE SET value = excluded.value
-      `).run(`${userId}_${key}`, value);
+      await sql`
+        INSERT INTO preferences (key, value) VALUES (${`${userId}_${key}`}, ${value})
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+      `;
       return NextResponse.json({ success: true });
     }
 
