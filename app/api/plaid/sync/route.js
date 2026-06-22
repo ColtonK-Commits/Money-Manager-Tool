@@ -4,6 +4,8 @@ import { PlaidApi, PlaidEnvironments, Configuration } from 'plaid';
 import Database from 'better-sqlite3';
 import path from 'path';
 import { NextResponse } from 'next/server';
+import { getServerSession } from 'next-auth';
+import { authOptions } from '../../auth/[...nextauth]/route';
 
 const plaidConfig = new Configuration({
   basePath: PlaidEnvironments[process.env.PLAID_ENV],
@@ -17,6 +19,12 @@ const plaidConfig = new Configuration({
 
 const plaidClient = new PlaidApi(plaidConfig);
 const db = new Database(path.join(process.cwd(), 'money_manager.db'));
+
+async function getUserId() {
+  const session = await getServerSession(authOptions);
+  if (!session?.user?.id) return null;
+  return session.user.id;
+}
 
 function mapCategory(primary, detailed, type) {
   const d = (detailed ?? '').toUpperCase();
@@ -70,11 +78,16 @@ function mapCategory(primary, detailed, type) {
 
 export async function POST(request) {
   try {
+    const userId = await getUserId();
+    if (!userId) return NextResponse.json({ error: 'Unauthorised' }, { status: 401 });
+
     const { account_id } = await request.json();
 
+    // Verify the account belongs to this user
     const linkedAccount = db.prepare(`
-      SELECT access_token, cursor FROM linked_accounts WHERE account_id = ?
-    `).get(account_id);
+      SELECT access_token, cursor FROM linked_accounts
+      WHERE account_id = ? AND user_id = ?
+    `).get(account_id, userId);
 
     if (!linkedAccount) {
       return NextResponse.json({ error: 'Account not found' }, { status: 404 });
@@ -100,8 +113,8 @@ export async function POST(request) {
 
     const insert = db.prepare(`
       INSERT INTO transactions
-        (transaction_date, post_date, description, category, amount, account, type, plaid_transaction_id)
-      SELECT ?, ?, ?, ?, ?, ?, ?, ?
+        (transaction_date, post_date, description, category, amount, account, type, plaid_transaction_id, user_id)
+      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
       WHERE NOT EXISTS (
         SELECT 1 FROM transactions WHERE plaid_transaction_id = ?
       )
@@ -127,6 +140,7 @@ export async function POST(request) {
           account_id,
           autoType,
           t.transaction_id,
+          userId,
           t.transaction_id
         );
       }
@@ -136,8 +150,9 @@ export async function POST(request) {
 
     // Update cursor and last synced
     db.prepare(`
-      UPDATE linked_accounts SET cursor = ?, last_synced = datetime('now') WHERE account_id = ?
-    `).run(cursor, account_id);
+      UPDATE linked_accounts SET cursor = ?, last_synced = datetime('now')
+      WHERE account_id = ? AND user_id = ?
+    `).run(cursor, account_id, userId);
 
     return NextResponse.json({ success: true, added: added.length });
   } catch (error) {
