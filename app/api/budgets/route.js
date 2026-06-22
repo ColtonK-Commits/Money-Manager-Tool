@@ -1,21 +1,32 @@
-// app/api/budgets/route.js
-
 import Database from 'better-sqlite3';
 import path from 'path';
 import { NextResponse } from 'next/server';
+import { getServerSession } from 'next-auth';
+import { authOptions } from '../auth/[...nextauth]/route';
 
 const db = new Database(path.join(process.cwd(), 'money_manager.db'));
 
+async function getUserId() {
+  const session = await getServerSession(authOptions);
+  if (!session?.user?.id) return null;
+  return session.user.id;
+}
+
 export async function GET(request) {
   try {
+    const userId = await getUserId();
+    if (!userId) return NextResponse.json({ error: 'Unauthorised' }, { status: 401 });
+
     const { searchParams } = new URL(request.url);
     const month = searchParams.get('month');
 
     // Return list of all available months for the dropdown
     if (searchParams.get('months') === 'true') {
       const months = db.prepare(`
-        SELECT DISTINCT month FROM monthly_budgets ORDER BY month DESC
-      `).all().map(r => r.month);
+        SELECT DISTINCT month FROM monthly_budgets
+        WHERE user_id = ?
+        ORDER BY month DESC
+      `).all(userId).map(r => r.month);
       return NextResponse.json(months);
     }
 
@@ -23,23 +34,25 @@ export async function GET(request) {
       return NextResponse.json({ error: 'month parameter is required' }, { status: 400 });
     }
 
-// Get all known categories from both categories table and transactions
+    // Get all known categories for this user
     const allCategories = db.prepare(`
       SELECT name AS category FROM categories
-      WHERE name != 'Transfer' AND name != 'Income'
+      WHERE user_id = ?
+        AND name != 'Transfer' AND name != 'Income'
       UNION
       SELECT DISTINCT category FROM transactions
-      WHERE category IS NOT NULL AND category != ''
+      WHERE user_id = ?
+        AND category IS NOT NULL AND category != ''
         AND category != 'Transfer' AND category != 'Income' AND category != 'Withdrawal'
       ORDER BY category
-    `).all().map(r => r.category);
+    `).all(userId, userId).map(r => r.category);
 
     // Get budgets for the requested month
     let monthBudgets = db.prepare(`
       SELECT category, monthly_target
       FROM monthly_budgets
-      WHERE month = ?
-    `).all(month);
+      WHERE month = ? AND user_id = ?
+    `).all(month, userId);
 
     // If no budgets exist for this month, auto-fill from previous month
     if (monthBudgets.length === 0) {
@@ -52,17 +65,16 @@ export async function GET(request) {
       const prevBudgets = db.prepare(`
         SELECT category, monthly_target
         FROM monthly_budgets
-        WHERE month = ?
-      `).all(prevMonth);
+        WHERE month = ? AND user_id = ?
+      `).all(prevMonth, userId);
 
-      // Insert previous month's budgets into this month
       const insert = db.prepare(`
-        INSERT OR IGNORE INTO monthly_budgets (category, month, monthly_target)
-        VALUES (?, ?, ?)
+        INSERT OR IGNORE INTO monthly_budgets (category, month, monthly_target, user_id)
+        VALUES (?, ?, ?, ?)
       `);
       const insertMany = db.transaction(() => {
         for (const b of prevBudgets) {
-          insert.run(b.category, month, b.monthly_target);
+          insert.run(b.category, month, b.monthly_target, userId);
         }
       });
       insertMany();
@@ -70,8 +82,8 @@ export async function GET(request) {
       monthBudgets = db.prepare(`
         SELECT category, monthly_target
         FROM monthly_budgets
-        WHERE month = ?
-      `).all(month);
+        WHERE month = ? AND user_id = ?
+      `).all(month, userId);
     }
 
     const budgetMap = {};
@@ -79,43 +91,47 @@ export async function GET(request) {
       budgetMap[b.category] = b.monthly_target;
     }
 
-    // 30-day spending for display (within the selected month)
+    // 30-day spending for display (corrected calculation)
     const spending30 = db.prepare(`
       SELECT
         category,
-        ROUND(SUM(ABS(amount)), 2) AS total_spent
+        ROUND(-SUM(amount), 2) AS total_spent
       FROM transactions
       WHERE
         strftime('%Y-%m', transaction_date) = ?
-        AND amount < 0
+        AND user_id = ?
         AND category IS NOT NULL
         AND category != ''
         AND category != 'Transfer'
         AND category != 'Withdrawal'
+        AND category != 'Income'
+        AND is_original_split != 1
       GROUP BY category
-    `).all(month);
+    `).all(month, userId);
 
     const spendingMap = {};
     for (const row of spending30) {
       spendingMap[row.category] = row.total_spent;
     }
 
-    // 90-day suggestion (still based on rolling 90 days from today)
+    // 90-day suggestion (corrected calculation)
     const spending90 = db.prepare(`
       SELECT
         category,
-        ROUND(SUM(ABS(amount)), 2) AS total_spent,
+        ROUND(-SUM(amount), 2) AS total_spent,
         MIN(transaction_date) AS earliest_date
       FROM transactions
       WHERE
         transaction_date >= DATE('now', '-90 days')
-        AND amount < 0
+        AND user_id = ?
         AND category IS NOT NULL
         AND category != ''
         AND category != 'Transfer'
         AND category != 'Withdrawal'
+        AND category != 'Income'
+        AND is_original_split != 1
       GROUP BY category
-    `).all();
+    `).all(userId);
 
     const suggestionMap = {};
     for (const row of spending90) {
@@ -144,6 +160,9 @@ export async function GET(request) {
 
 export async function POST(request) {
   try {
+    const userId = await getUserId();
+    if (!userId) return NextResponse.json({ error: 'Unauthorised' }, { status: 401 });
+
     const { category, monthly_target, month } = await request.json();
 
     if (!category || monthly_target === undefined || !month) {
@@ -151,10 +170,10 @@ export async function POST(request) {
     }
 
     db.prepare(`
-      INSERT INTO monthly_budgets (category, month, monthly_target)
-      VALUES (?, ?, ?)
-      ON CONFLICT(category, month) DO UPDATE SET monthly_target = excluded.monthly_target
-    `).run(category, month, monthly_target);
+      INSERT INTO monthly_budgets (category, month, monthly_target, user_id)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(category, month, user_id) DO UPDATE SET monthly_target = excluded.monthly_target
+    `).run(category, month, monthly_target, userId);
 
     return NextResponse.json({ success: true });
   } catch (error) {
