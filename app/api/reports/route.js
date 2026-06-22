@@ -3,11 +3,22 @@
 import Database from 'better-sqlite3';
 import path from 'path';
 import { NextResponse } from 'next/server';
+import { getServerSession } from 'next-auth';
+import { authOptions } from '../auth/[...nextauth]/route';
 
 const db = new Database(path.join(process.cwd(), 'money_manager.db'));
 
+async function getUserId() {
+  const session = await getServerSession(authOptions);
+  if (!session?.user?.id) return null;
+  return session.user.id;
+}
+
 export async function GET(request) {
   try {
+    const userId = await getUserId();
+    if (!userId) return NextResponse.json({ error: 'Unauthorised' }, { status: 401 });
+
     const { searchParams } = new URL(request.url);
     const report = searchParams.get('report');
     const start = searchParams.get('start');
@@ -20,12 +31,13 @@ export async function GET(request) {
       // --- Top merchants by spend ---
       case 'top_merchants': {
         const rows = db.prepare(`
-SELECT
+          SELECT
             COALESCE(custom_description, description) AS merchant,
             COUNT(*) AS transaction_count,
             ROUND(-SUM(amount), 2) AS total_spent
           FROM transactions
-          WHERE category != 'Transfer'
+          WHERE user_id = ?
+            AND category != 'Transfer'
             AND category != 'Withdrawal'
             AND category != 'Income'
             AND is_original_split != 1
@@ -34,12 +46,12 @@ SELECT
           GROUP BY COALESCE(custom_description, description)
           ORDER BY total_spent DESC
           LIMIT 20
-        `).all(start, end);
+        `).all(userId, start, end);
         return NextResponse.json(rows);
       }
 
       // --- Biggest single transactions ---
-      case 'biggest_transactions': {
+case 'biggest_transactions': {
         const rows = db.prepare(`
           SELECT
             COALESCE(custom_description, description) AS merchant,
@@ -47,14 +59,16 @@ SELECT
             transaction_date,
             ABS(amount) AS amount
           FROM transactions
-          WHERE amount < 0
+          WHERE user_id = ?
+            AND amount < 0
+            AND is_original_split != 1
             AND category != 'Transfer'
             AND category != 'Withdrawal'
             AND transaction_date >= COALESCE(?, DATE('now', '-12 months'))
             AND transaction_date <= COALESCE(?, DATE('now'))
           ORDER BY amount DESC
           LIMIT 20
-        `).all(start, end);
+        `).all(userId, start, end);
         return NextResponse.json(rows);
       }
 
@@ -69,7 +83,8 @@ SELECT
             ROUND(-SUM(amount) / COUNT(DISTINCT strftime('%Y-%W', transaction_date)), 2) AS weekly_avg,
             ROUND(-SUM(amount) / COUNT(DISTINCT transaction_date), 2) AS daily_avg
           FROM transactions
-          WHERE category IS NOT NULL
+          WHERE user_id = ?
+            AND category IS NOT NULL
             AND category != ''
             AND category != 'Transfer'
             AND category != 'Withdrawal'
@@ -79,7 +94,7 @@ SELECT
             AND transaction_date <= COALESCE(?, DATE('now'))
           GROUP BY category
           ORDER BY total_spent DESC
-        `).all(start, end);
+        `).all(userId, start, end);
         return NextResponse.json(rows);
       }
 
@@ -93,7 +108,8 @@ SELECT
             ROUND(-SUM(CASE WHEN strftime('%Y', transaction_date) = ? THEN amount ELSE 0 END), 2) AS current_year,
             ROUND(-SUM(CASE WHEN strftime('%Y', transaction_date) = ? THEN amount ELSE 0 END), 2) AS prev_year
           FROM transactions
-          WHERE category IS NOT NULL
+          WHERE user_id = ?
+            AND category IS NOT NULL
             AND category != ''
             AND category != 'Transfer'
             AND category != 'Withdrawal'
@@ -102,7 +118,7 @@ SELECT
             AND strftime('%Y', transaction_date) IN (?, ?)
           GROUP BY category
           ORDER BY current_year DESC
-        `).all(String(currentYear), String(prevYear), String(currentYear), String(prevYear));
+        `).all(String(currentYear), String(prevYear), userId, String(currentYear), String(prevYear));
         return NextResponse.json({ rows, currentYear, prevYear });
       }
 
@@ -114,7 +130,8 @@ SELECT
             category,
             ROUND(-SUM(amount), 2) AS total_spent
           FROM transactions
-          WHERE category IS NOT NULL
+          WHERE user_id = ?
+            AND category IS NOT NULL
             AND category != ''
             AND category != 'Transfer'
             AND category != 'Withdrawal'
@@ -123,7 +140,7 @@ SELECT
             AND transaction_date >= DATE('now', '-12 months')
           GROUP BY month, category
           ORDER BY month ASC, total_spent DESC
-        `).all();
+        `).all(userId);
         return NextResponse.json(rows);
       }
 
@@ -135,13 +152,14 @@ SELECT
             ROUND(SUM(CASE WHEN amount > 0 AND category = 'Income' THEN amount ELSE 0 END), 2) AS income,
             ROUND(-SUM(CASE WHEN category != 'Income' THEN amount ELSE 0 END), 2) AS spending
           FROM transactions
-          WHERE transaction_date >= DATE('now', '-12 months')
+          WHERE user_id = ?
+            AND transaction_date >= DATE('now', '-12 months')
             AND category != 'Transfer'
             AND category != 'Withdrawal'
             AND is_original_split != 1
           GROUP BY month
           ORDER BY month ASC
-        `).all();
+        `).all(userId);
 
         const withRate = rows.map(r => ({
           ...r,
@@ -161,16 +179,16 @@ SELECT
             strftime('%Y-%m', transaction_date) AS month,
             ROUND(-SUM(amount), 2) AS total_spent
           FROM transactions
-          WHERE category != 'Transfer'
+          WHERE user_id = ?
+            AND category != 'Transfer'
             AND category != 'Withdrawal'
             AND category != 'Income'
             AND is_original_split != 1
             AND transaction_date >= DATE('now', '-12 months')
           GROUP BY month
           ORDER BY month ASC
-        `).all();
+        `).all(userId);
 
-        // Calculate 3-month and 12-month rolling averages
         const withRolling = rows.map((row, i) => {
           const last3 = rows.slice(Math.max(0, i - 2), i + 1);
           const last12 = rows.slice(Math.max(0, i - 11), i + 1);
@@ -196,7 +214,9 @@ SELECT
           LEFT JOIN monthly_budgets mb
             ON mb.category = t.category
             AND mb.month = strftime('%Y-%m', t.transaction_date)
-          WHERE t.category IS NOT NULL
+            AND mb.user_id = ?
+          WHERE t.user_id = ?
+            AND t.category IS NOT NULL
             AND t.category != ''
             AND t.category != 'Transfer'
             AND t.category != 'Withdrawal'
@@ -205,9 +225,8 @@ SELECT
             AND t.transaction_date >= DATE('now', '-6 months')
           GROUP BY t.category, month
           ORDER BY t.category, month
-        `).all();
+        `).all(userId, userId);
 
-        // Group by category and calculate average variance
         const byCategory = {};
         for (const row of rows) {
           if (!byCategory[row.category]) {
@@ -244,16 +263,16 @@ SELECT
             memo,
             account
           FROM transactions
-          WHERE transaction_date >= COALESCE(?, '2000-01-01')
+          WHERE user_id = ?
+            AND transaction_date >= COALESCE(?, '2000-01-01')
             AND transaction_date <= COALESCE(?, DATE('now'))
           ORDER BY transaction_date DESC
-        `).all(start, end);
+        `).all(userId, start, end);
         return NextResponse.json(rows);
       }
 
       // --- Recurring transaction detection ---
       case 'recurring': {
-        // Get all transactions grouped by merchant, ordered by date
         const allTx = db.prepare(`
           SELECT
             COALESCE(custom_description, description) AS merchant,
@@ -261,12 +280,13 @@ SELECT
             ABS(amount) AS amount,
             category
           FROM transactions
-          WHERE amount < 0
+          WHERE user_id = ?
+            AND amount < 0
+            AND is_original_split != 1
             AND transaction_date >= DATE('now', '-13 months')
           ORDER BY merchant, transaction_date ASC
-        `).all();
+        `).all(userId);
 
-        // Group by merchant
         const byMerchant = {};
         for (const tx of allTx) {
           if (!byMerchant[tx.merchant]) byMerchant[tx.merchant] = [];
@@ -278,7 +298,6 @@ SELECT
         for (const [merchant, txs] of Object.entries(byMerchant)) {
           if (txs.length < 2) continue;
 
-          // Calculate gaps in days between consecutive transactions
           const gaps = [];
           for (let i = 1; i < txs.length; i++) {
             const a = new Date(txs[i - 1].transaction_date);
@@ -289,7 +308,6 @@ SELECT
           const avgGap = gaps.reduce((s, g) => s + g, 0) / gaps.length;
           const maxDeviation = Math.max(...gaps.map(g => Math.abs(g - avgGap)));
 
-          // Detect interval — allow some tolerance
           let interval = null;
           if (avgGap >= 5 && avgGap <= 9 && maxDeviation <= 3) interval = 'weekly';
           else if (avgGap >= 25 && avgGap <= 35 && maxDeviation <= 5) interval = 'monthly';
@@ -297,11 +315,9 @@ SELECT
 
           if (!interval) continue;
 
-          // Calculate average amount
           const avgAmount = txs.reduce((s, t) => s + t.amount, 0) / txs.length;
           const amountVariance = Math.max(...txs.map(t => Math.abs(t.amount - avgAmount)));
 
-          // Calculate next expected date
           const lastDate = new Date(txs[txs.length - 1].transaction_date);
           const nextDate = new Date(lastDate);
           nextDate.setDate(nextDate.getDate() + Math.round(avgGap));
@@ -319,7 +335,6 @@ SELECT
           });
         }
 
-        // Sort by interval then amount
         const order = { weekly: 0, monthly: 1, annual: 2 };
         recurring.sort((a, b) => order[a.interval] - order[b.interval] || b.avg_amount - a.avg_amount);
 
@@ -334,12 +349,13 @@ SELECT
             ROUND(SUM(amount), 2) AS total_income,
             COUNT(*) AS transaction_count
           FROM transactions
-          WHERE amount > 0
+          WHERE user_id = ?
+            AND amount > 0
             AND category = 'Income'
             AND transaction_date >= DATE('now', '-12 months')
           GROUP BY month
           ORDER BY month ASC
-        `).all();
+        `).all(userId);
         return NextResponse.json(rows);
       }
 
@@ -352,12 +368,13 @@ SELECT
             ROUND(SUM(amount), 2) AS amount,
             transaction_date
           FROM transactions
-          WHERE amount > 0
+          WHERE user_id = ?
+            AND amount > 0
             AND category = 'Income'
             AND transaction_date >= COALESCE(?, DATE('now', '-12 months'))
             AND transaction_date <= COALESCE(?, DATE('now'))
           ORDER BY transaction_date DESC
-        `).all(start, end);
+        `).all(userId, start, end);
         return NextResponse.json(rows);
       }
 
@@ -367,10 +384,11 @@ SELECT
           SELECT
             ROUND(SUM(amount), 2) AS total_income
           FROM transactions
-          WHERE amount > 0
+          WHERE user_id = ?
+            AND amount > 0
             AND category = 'Income'
             AND strftime('%Y-%m', transaction_date) = ?
-        `).get(month);
+        `).get(userId, month);
         return NextResponse.json({ total_income: row?.total_income ?? 0 });
       }
 
