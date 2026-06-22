@@ -3,21 +3,32 @@
 import Database from 'better-sqlite3';
 import path from 'path';
 import { NextResponse } from 'next/server';
+import { getServerSession } from 'next-auth';
+import { authOptions } from '../auth/[...nextauth]/route';
 
 const db = new Database(path.join(process.cwd(), 'money_manager.db'));
 
+async function getUserId() {
+  const session = await getServerSession(authOptions);
+  if (!session?.user?.id) return null;
+  return session.user.id;
+}
+
 export async function GET(request) {
   try {
+    const userId = await getUserId();
+    if (!userId) return NextResponse.json({ error: 'Unauthorised' }, { status: 401 });
+
     const { searchParams } = new URL(request.url);
     const includeArchived = searchParams.get('archived') === 'true';
 
     const goals = db.prepare(`
       SELECT * FROM savings_goals
-      WHERE archived = ?
+      WHERE user_id = ?
+        AND archived = ?
       ORDER BY target_date ASC
-    `).all(includeArchived ? 1 : 0);
+    `).all(userId, includeArchived ? 1 : 0);
 
-    // For each goal, get total saved and contributions
     const result = goals.map(goal => {
       const contributions = db.prepare(`
         SELECT * FROM goal_contributions
@@ -29,7 +40,6 @@ export async function GET(request) {
       const remaining = Math.max(0, goal.target_amount - total_saved);
       const progress_pct = Math.min((total_saved / goal.target_amount) * 100, 100);
 
-      // Calculate if on pace
       const today = new Date();
       const targetDate = new Date(goal.target_date);
       const createdAt = new Date(goal.created_at);
@@ -62,6 +72,9 @@ export async function GET(request) {
 
 export async function POST(request) {
   try {
+    const userId = await getUserId();
+    if (!userId) return NextResponse.json({ error: 'Unauthorised' }, { status: 401 });
+
     const body = await request.json();
     const { action } = body;
 
@@ -72,9 +85,9 @@ export async function POST(request) {
         return NextResponse.json({ error: 'name, target_amount and target_date are required' }, { status: 400 });
       }
       const result = db.prepare(`
-        INSERT INTO savings_goals (name, target_amount, target_date)
-        VALUES (?, ?, ?)
-      `).run(name, target_amount, target_date);
+        INSERT INTO savings_goals (name, target_amount, target_date, user_id)
+        VALUES (?, ?, ?, ?)
+      `).run(name, target_amount, target_date, userId);
       return NextResponse.json({ success: true, id: result.lastInsertRowid });
     }
 
@@ -84,6 +97,10 @@ export async function POST(request) {
       if (!goal_id || !amount || !contribution_date) {
         return NextResponse.json({ error: 'goal_id, amount and contribution_date are required' }, { status: 400 });
       }
+      // Verify the goal belongs to this user
+      const goal = db.prepare(`SELECT id FROM savings_goals WHERE id = ? AND user_id = ?`).get(goal_id, userId);
+      if (!goal) return NextResponse.json({ error: 'Goal not found' }, { status: 404 });
+
       db.prepare(`
         INSERT INTO goal_contributions (goal_id, amount, note, contribution_date)
         VALUES (?, ?, ?, ?)
@@ -94,28 +111,41 @@ export async function POST(request) {
     // Archive a goal
     if (action === 'archive_goal') {
       const { goal_id } = body;
-      db.prepare(`UPDATE savings_goals SET archived = 1 WHERE id = ?`).run(goal_id);
+      const goal = db.prepare(`SELECT id FROM savings_goals WHERE id = ? AND user_id = ?`).get(goal_id, userId);
+      if (!goal) return NextResponse.json({ error: 'Goal not found' }, { status: 404 });
+
+      db.prepare(`UPDATE savings_goals SET archived = 1 WHERE id = ? AND user_id = ?`).run(goal_id, userId);
       return NextResponse.json({ success: true });
     }
 
     // Unarchive a goal
     if (action === 'unarchive_goal') {
       const { goal_id } = body;
-      db.prepare(`UPDATE savings_goals SET archived = 0 WHERE id = ?`).run(goal_id);
+      const goal = db.prepare(`SELECT id FROM savings_goals WHERE id = ? AND user_id = ?`).get(goal_id, userId);
+      if (!goal) return NextResponse.json({ error: 'Goal not found' }, { status: 404 });
+
+      db.prepare(`UPDATE savings_goals SET archived = 0 WHERE id = ? AND user_id = ?`).run(goal_id, userId);
       return NextResponse.json({ success: true });
     }
 
     // Delete a goal permanently
     if (action === 'delete_goal') {
       const { goal_id } = body;
+      const goal = db.prepare(`SELECT id FROM savings_goals WHERE id = ? AND user_id = ?`).get(goal_id, userId);
+      if (!goal) return NextResponse.json({ error: 'Goal not found' }, { status: 404 });
+
       db.prepare(`DELETE FROM goal_contributions WHERE goal_id = ?`).run(goal_id);
-      db.prepare(`DELETE FROM savings_goals WHERE id = ?`).run(goal_id);
+      db.prepare(`DELETE FROM savings_goals WHERE id = ? AND user_id = ?`).run(goal_id, userId);
       return NextResponse.json({ success: true });
     }
 
     // Delete a contribution
     if (action === 'delete_contribution') {
-      const { contribution_id } = body;
+      const { contribution_id, goal_id } = body;
+      // Verify the parent goal belongs to this user
+      const goal = db.prepare(`SELECT id FROM savings_goals WHERE id = ? AND user_id = ?`).get(goal_id, userId);
+      if (!goal) return NextResponse.json({ error: 'Goal not found' }, { status: 404 });
+
       db.prepare(`DELETE FROM goal_contributions WHERE id = ?`).run(contribution_id);
       return NextResponse.json({ success: true });
     }
