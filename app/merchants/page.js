@@ -13,6 +13,7 @@ export default function MerchantsPage() {
   const [saved, setSaved] = useState(false);
   const [editingRule, setEditingRule] = useState(null);
   const [confirmDeleteRule, setConfirmDeleteRule] = useState(null);
+const [reapplyingRule, setReapplyingRule] = useState(null);
 
   useEffect(() => {
     fetchRules();
@@ -40,6 +41,26 @@ export default function MerchantsPage() {
     });
     setConfirmDeleteRule(null);
     fetchRules();
+  }
+
+  async function handleReapply(rule) {
+    setReapplyingRule(rule);
+    setPattern(rule.pattern);
+    setRuleName(rule.rule_name);
+    setLoading(true);
+    setSaved(false);
+    setResults(null);
+    setReviewed({});
+
+    const res = await fetch('/api/merchants', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rule_name: rule.rule_name, pattern: rule.pattern, reapply: true }),
+    });
+
+    const data = await res.json();
+    setResults(data);
+    setLoading(false);
   }
 
   async function handleSearch() {
@@ -143,6 +164,13 @@ export default function MerchantsPage() {
 
       {results && (
         <div className="space-y-6">
+          {reapplyingRule && (
+            <div style={{ backgroundColor: '#E6F1FB', border: '0.5px solid #B5D4F4', borderRadius: '8px', padding: '10px 16px', marginBottom: '8px' }}>
+              <p style={{ fontSize: '13px', color: '#185FA5', margin: 0 }}>
+                Re-applying rule: <strong>{reapplyingRule.rule_name}</strong> — only showing transactions not yet renamed
+              </p>
+            </div>
+          )}
           <div className="bg-white rounded-xl shadow p-6">
             <h2 className="text-lg font-semibold text-gray-700 mb-1">
               Auto-Approved
@@ -252,6 +280,12 @@ export default function MerchantsPage() {
                       className="px-3 py-1 bg-gray-100 hover:bg-gray-200 text-gray-600 rounded-lg text-xs font-medium"
                     >
                       Edit
+                    </button>
+                    <button
+                      onClick={() => handleReapply(r)}
+                      className="px-3 py-1 bg-blue-100 hover:bg-blue-200 text-blue-700 rounded-lg text-xs font-medium"
+                    >
+                      Re-apply
                     </button>
                     {confirmDeleteRule === r.id ? (
                       <div className="flex gap-2">

@@ -30,13 +30,21 @@ export async function POST(request) {
     const userId = await getUserId();
     if (!userId) return NextResponse.json({ error: 'Unauthorised' }, { status: 401 });
 
-    const { rule_name, pattern } = await request.json();
+    const body = await request.json();
+    const { rule_name, pattern, reapply } = body;
 
-    const transactions = await sql`
-      SELECT id, description FROM transactions
-      WHERE LOWER(description) LIKE LOWER(${`%${pattern}%`})
-      AND user_id = ${userId}
-    `;
+    const transactions = reapply
+      ? await sql`
+          SELECT id, description FROM transactions
+          WHERE LOWER(description) LIKE LOWER(${`%${pattern}%`})
+          AND user_id = ${userId}
+          AND (custom_description IS NULL OR custom_description != ${rule_name})
+        `
+      : await sql`
+          SELECT id, description FROM transactions
+          WHERE LOWER(description) LIKE LOWER(${`%${pattern}%`})
+          AND user_id = ${userId}
+        `;
 
     const autoApproved = [];
     const needsReview = [];
