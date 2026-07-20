@@ -87,21 +87,23 @@ const [reapplyingRule, setReapplyingRule] = useState(null);
       ...results.needsReview.filter(t => reviewed[t.id] === true).map(t => t.id),
     ];
 
-    await fetch('/api/merchants', {
+await fetch('/api/merchants', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         rule_name: ruleName || pattern,
         pattern,
         approvedIds,
+        existingMerchantId: reapplyingRule?.id ?? null,
       }),
     });
 
-    setSaved(true);
+setSaved(true);
     setResults(null);
     setPattern('');
     setRuleName('');
     setReviewed({});
+    setReapplyingRule(null);
     fetchRules();
   }
 

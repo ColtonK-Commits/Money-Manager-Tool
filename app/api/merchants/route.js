@@ -81,15 +81,22 @@ export async function PATCH(request) {
       return NextResponse.json({ success: true });
     }
 
-    const { rule_name, pattern, approvedIds } = body;
+    const { rule_name, pattern, approvedIds, existingMerchantId } = body;
 
-    const result = await sql`
-      INSERT INTO merchants (rule_name, pattern, user_id)
-      VALUES (${rule_name}, ${pattern}, ${userId})
-      RETURNING id
-    `;
+    let merchantId;
 
-    const merchantId = result[0].id;
+    if (existingMerchantId) {
+      // Re-applying existing rule — don't create a new merchant entry
+      merchantId = existingMerchantId;
+    } else {
+      // New rule — insert into merchants
+      const result = await sql`
+        INSERT INTO merchants (rule_name, pattern, user_id)
+        VALUES (${rule_name}, ${pattern}, ${userId})
+        RETURNING id
+      `;
+      merchantId = result[0].id;
+    }
 
     for (const id of approvedIds) {
       const txRows = await sql`

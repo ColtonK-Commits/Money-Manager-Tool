@@ -219,14 +219,6 @@ function TransactionsInner() {
     setIsolating(false);
   }
 
-  // Get checked transaction objects
-  const checkedTransactions = transactions.filter(t => checkedIds.has(t.id));
-const checkedByCategory = checkedTransactions.reduce((acc, t) => {
-    const cat = t.category ?? 'Uncategorised';
-    acc[cat] = (acc[cat] ?? 0) - t.amount;
-    return acc;
-  }, {});
-
   // Export checked to Excel
   async function handleExportCheckedExcel() {
     const XLSX = await import('xlsx');
@@ -405,6 +397,13 @@ const checkedByCategory = checkedTransactions.reduce((acc, t) => {
     fetchTransactions();
     setSelected(null);
   }
+const checkedTransactions = transactions.filter(t => checkedIds.has(t.id));
+  const checkedTotal = checkedTransactions.reduce((sum, t) => sum + Math.abs(t.amount), 0);
+  const checkedByCategory = checkedTransactions.reduce((acc, t) => {
+    const cat = t.category ?? 'Uncategorised';
+    acc[cat] = (acc[cat] ?? 0) + Math.abs(t.amount);
+    return acc;
+  }, {});
 
   const isExistingCategory = !!categoryColours[newForm.category];
   const hasFilters = filterCategory.length > 0 || filterType.length > 0 || filterLabel.length > 0 || filterAccount.length > 0 || filterStart || filterEnd || searchQuery.trim();
