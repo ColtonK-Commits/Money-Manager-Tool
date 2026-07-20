@@ -103,16 +103,18 @@ export async function PATCH(request) {
     for (const id of approvedIds) {
       const numericId = Number(id);
 
-      const txRows = await sql`
+const txRows = await sql`
         SELECT description FROM transactions
         WHERE id = ${numericId} AND user_id = ${userId}
       `;
-      const description = txRows[0]?.description ?? null;
+      const description = txRows[0]?.description;
 
-      await sql`
-        INSERT INTO merchant_approvals (merchant_id, original_description, approved)
-        VALUES (${merchantId}, ${description}, ${1})
-      `;
+      if (description) {
+        await sql`
+          INSERT INTO merchant_approvals (merchant_id, original_description, approved)
+          VALUES (${merchantId}, ${description}, ${1})
+        `;
+      }
 
       await sql`
         UPDATE transactions
