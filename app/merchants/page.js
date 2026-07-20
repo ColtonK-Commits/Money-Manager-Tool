@@ -86,7 +86,6 @@ const [reapplyingRule, setReapplyingRule] = useState(null);
       ...results.autoApproved.map(t => t.id),
       ...results.needsReview.filter(t => reviewed[t.id] === true).map(t => t.id),
     ];
-    console.log('Sending to PATCH:', { rule_name: ruleName || pattern, pattern, approvedIds, existingMerchantId: reapplyingRule?.id ?? null });
 
 await fetch('/api/merchants', {
       method: 'PATCH',
