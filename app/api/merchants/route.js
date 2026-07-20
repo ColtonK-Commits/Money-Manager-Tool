@@ -72,7 +72,7 @@ export async function PATCH(request) {
 
     const body = await request.json();
 
-    // Update existing merchant rule
+    // Update existing merchant rule name/pattern only
     if (body.id && !body.approvedIds) {
       await sql`
         UPDATE merchants SET rule_name = ${body.rule_name}, pattern = ${body.pattern}
@@ -83,40 +83,47 @@ export async function PATCH(request) {
 
     const { rule_name, pattern, approvedIds, existingMerchantId } = body;
 
+    if (!Array.isArray(approvedIds)) {
+      return NextResponse.json({ error: 'approvedIds must be an array' }, { status: 400 });
+    }
+
     let merchantId;
 
     if (existingMerchantId) {
-      // Re-applying existing rule — don't create a new merchant entry
-      merchantId = existingMerchantId;
+      merchantId = Number(existingMerchantId);
     } else {
-      // New rule — insert into merchants
       const result = await sql`
         INSERT INTO merchants (rule_name, pattern, user_id)
         VALUES (${rule_name}, ${pattern}, ${userId})
         RETURNING id
       `;
-      merchantId = result[0].id;
+      merchantId = Number(result[0].id);
     }
 
     for (const id of approvedIds) {
+      const numericId = Number(id);
+
       const txRows = await sql`
-        SELECT description FROM transactions WHERE id = ${id} AND user_id = ${userId}
+        SELECT description FROM transactions
+        WHERE id = ${numericId} AND user_id = ${userId}
       `;
       const description = txRows[0]?.description ?? null;
 
       await sql`
         INSERT INTO merchant_approvals (merchant_id, original_description, approved)
-        VALUES (${merchantId}, ${description}, 1)
+        VALUES (${merchantId}, ${description}, ${1})
       `;
 
       await sql`
-        UPDATE transactions SET custom_description = ${rule_name}
-        WHERE id = ${id} AND user_id = ${userId}
+        UPDATE transactions
+        SET custom_description = ${rule_name}
+        WHERE id = ${numericId} AND user_id = ${userId}
       `;
     }
 
     return NextResponse.json({ success: true });
   } catch (error) {
+    console.error('PATCH /api/merchants error:', error);
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
