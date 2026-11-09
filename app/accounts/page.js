@@ -81,6 +81,33 @@ export default function AccountsPage() {
     setImportFile(null);
   }
 
+    async function handleRelogin(accountId) {
+    const res = await fetch('/api/plaid/create-link-token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ account_id: accountId }),
+    });
+    const data = await res.json();
+
+    if (!data.link_token) {
+      alert('Could not start re-login. Check the Vercel logs for "Plaid link token error".');
+      return;
+    }
+
+    const handler = window.Plaid.create({
+      token: data.link_token,
+      onSuccess: async () => {
+        // Login repaired — sync straight away to confirm it works
+        await handleSync(accountId);
+      },
+      onExit: (err) => {
+        if (err) console.error('Plaid re-login exit error:', err);
+      },
+    });
+
+    handler.open();
+  }
+
   async function handleSync(accountId) {
     setSyncing(accountId);
     setSyncResults(prev => ({ ...prev, [accountId]: null }));
