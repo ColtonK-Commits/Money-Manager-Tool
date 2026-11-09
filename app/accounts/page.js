@@ -294,6 +294,13 @@ export default function AccountsPage() {
                   </span>
                 )}
                 <button
+                  onClick={() => handleRelogin(account.account_id)}
+                  disabled={!linkReady}
+                  className="bg-yellow-100 hover:bg-yellow-200 disabled:opacity-50 text-yellow-700 px-4 py-1.5 rounded-lg text-xs font-medium"
+                >
+                  Re-login
+                </button>
+                <button
                   onClick={() => handleSync(account.account_id)}
                   disabled={syncing === account.account_id}
                   className="bg-gray-100 hover:bg-gray-200 disabled:opacity-50 text-gray-700 px-4 py-1.5 rounded-lg text-xs font-medium"
